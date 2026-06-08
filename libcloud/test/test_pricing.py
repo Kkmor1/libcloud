@@ -16,6 +16,7 @@
 import sys
 import os.path
 import unittest
+from unittest import mock
 
 import libcloud.pricing
 
@@ -27,6 +28,7 @@ class PricingTestCase(unittest.TestCase):
         super().setUp()
 
         libcloud.pricing.PRICING_DATA = {"compute": {}, "storage": {}}
+        libcloud.pricing._PRICING_FILE_CACHE = {}
 
     def test_get_pricing_success(self):
         self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
@@ -110,6 +112,149 @@ class PricingTestCase(unittest.TestCase):
 
         libcloud.pricing.set_pricing(driver_type="compute", driver_name="foo", pricing={"foo": 1})
         self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
+
+    def test_clear_pricing_cache(self):
+        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {"1": 1.0}
+        libcloud.pricing._PRICING_FILE_CACHE["/fake/path"] = {"compute": {}}
+
+        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
+        self.assertTrue("/fake/path" in libcloud.pricing._PRICING_FILE_CACHE)
+
+        libcloud.pricing.clear_pricing_cache()
+
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+        self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+
+    def test_pricing_file_cache_populated_on_first_load(self):
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+
+        self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+        self.assertEqual(
+            libcloud.pricing._PRICING_FILE_CACHE[PRICING_FILE_PATH]["compute"]["foo"]["1"],
+            1.0,
+        )
+
+    def test_pricing_file_cache_reused_for_subsequent_drivers(self):
+        pricing = libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertEqual(pricing["1"], 1.0)
+
+        self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+
+        call_count = [0]
+        original_open = open
+
+        def counting_open(*args, **kwargs):
+            call_count[0] += 1
+            return original_open(*args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=counting_open):
+            pricing = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="baz",
+                pricing_file_path=PRICING_FILE_PATH,
+            )
+            self.assertEqual(pricing["1"], 5.0)
+
+        self.assertEqual(call_count[0], 0)
+
+    def test_custom_pricing_file_cached_separately(self):
+        custom_path = os.path.join(os.path.dirname(__file__), "pricing_test_custom.json")
+        test_data = {
+            "compute": {"custom_driver": {"small": 0.01}},
+            "updated": 1,
+        }
+        import json
+
+        with open(custom_path, "w") as f:
+            json.dump(test_data, f)
+
+        try:
+            libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=PRICING_FILE_PATH,
+            )
+            libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="custom_driver",
+                pricing_file_path=custom_path,
+            )
+
+            self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+            self.assertTrue(custom_path in libcloud.pricing._PRICING_FILE_CACHE)
+            self.assertEqual(
+                libcloud.pricing._PRICING_FILE_CACHE[custom_path]["compute"]["custom_driver"][
+                    "small"
+                ],
+                0.01,
+            )
+        finally:
+            os.remove(custom_path)
+
+    def test_get_size_price_lazy_loading(self):
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+
+        with mock.patch(
+            "libcloud.pricing.get_pricing_file_path", return_value=PRICING_FILE_PATH
+        ):
+            price = libcloud.pricing.get_size_price(
+                driver_type="compute",
+                driver_name="foo",
+                size_id="1",
+            )
+
+        self.assertEqual(price, 1.0)
+
+    def test_clear_pricing_cache_clears_file_cache(self):
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
+
+        libcloud.pricing.clear_pricing_cache()
+
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+    def test_invalidate_pricing_cache_clears_file_cache(self):
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
+
+        libcloud.pricing.invalidate_pricing_cache()
+
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+    def test_clear_pricing_data_clears_file_cache(self):
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
+
+        libcloud.pricing.clear_pricing_data()
+
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
 
     def test_get_pricing_data_caching(self):
         # Ensure we only cache pricing data in memory for requested drivers

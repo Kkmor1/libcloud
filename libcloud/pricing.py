@@ -41,6 +41,7 @@ __all__ = [
     "get_image_price",
     "set_pricing",
     "clear_pricing_data",
+    "clear_pricing_cache",
     "download_pricing_file",
 ]
 
@@ -55,6 +56,11 @@ CUSTOM_PRICING_FILE_PATH = os.path.expanduser("~/.libcloud/pricing.json")
 
 # Pricing data cache
 PRICING_DATA = {"compute": {}, "storage": {}}  # type: Dict[str, Dict]
+
+# Cache for parsed pricing files, keyed by file path.
+# This avoids re-reading and re-parsing the entire pricing.json file
+# every time pricing data for a new driver is requested.
+_PRICING_FILE_CACHE = {}  # type: Dict[str, dict]
 
 VALID_PRICING_DRIVER_TYPES = ["compute", "storage"]
 
@@ -113,10 +119,15 @@ def get_pricing(driver_type, driver_name, pricing_file_path=None, cache_all=Fals
     if not pricing_file_path:
         pricing_file_path = get_pricing_file_path(file_path=pricing_file_path)
 
-    with open(pricing_file_path) as fp:
-        content = fp.read()
+    if pricing_file_path in _PRICING_FILE_CACHE:
+        pricing_data = _PRICING_FILE_CACHE[pricing_file_path]
+    else:
+        with open(pricing_file_path) as fp:
+            content = fp.read()
 
-    pricing_data = json.loads(content)
+        pricing_data = json.loads(content)
+        _PRICING_FILE_CACHE[pricing_file_path] = pricing_data
+
     driver_pricing = pricing_data[driver_type][driver_name]
 
     # NOTE: We only cache prices in memory for the the requested drivers.
@@ -290,6 +301,7 @@ def invalidate_pricing_cache():
     """
     PRICING_DATA["compute"] = {}
     PRICING_DATA["storage"] = {}
+    _PRICING_FILE_CACHE.clear()
 
 
 def clear_pricing_data():
@@ -299,6 +311,16 @@ def clear_pricing_data():
 
     Note: This method does the same thing as invalidate_pricing_cache and is
     here for backward compatibility reasons.
+    """
+    invalidate_pricing_cache()
+
+
+def clear_pricing_cache():
+    # type: () -> None
+    """
+    Clear all cached pricing data including per-driver caches and
+    the parsed file cache. After calling this method, the next pricing
+    request will re-read the pricing file from disk.
     """
     invalidate_pricing_cache()
 

@@ -1,0 +1,51 @@
+diff --git a/.github/workflows/main.yml b/.github/workflows/main.yml
+index 540991747..9660744da 100644
+--- a/.github/workflows/main.yml
++++ b/.github/workflows/main.yml
+@@ -39,6 +39,7 @@ jobs:
+           - "3.14"
+           # cryptography is not compatible with older PyPy versions
+           - "pypy-3.10"
++          - "pypy-3.14"
+         os:
+           - ubuntu-latest
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index b8ea1260e..8f72968be 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -50,7 +50,7 @@ classifiers = [
+     "Programming Language :: Python :: Implementation :: PyPy",
+     "Topic :: Software Development :: Libraries :: Python Modules",
+ ]
+-requires-python = ">=3.10"
++requires-python = ">=3.10, <=3.14"
+ dependencies = [
+     "requests>=2.26.0",
+ ]
+diff --git a/tox.ini b/tox.ini
+index a48bd1158..4aa059607 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -1,5 +1,5 @@
+ [tox]
+-envlist = py{pypy3,3.10,3.11,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
++envlist = py{pypy3,3.10,3.11,3.12,3.13,3.14,pypy-3.10,pypy-3.14},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
+ skipsdist = true
+ requires =
+     wheel
+@@ -26,10 +26,11 @@ basepython =
+     pypypy-3.10: pypy3.10
+     pypyjion: pyjion
+     {docs,checks,black,black-check,bandit,lint,pylint,mypy,micro-benchmarks,coverage,import-timings,isort,isort-check,pyupgrade,integration-storage}: python3.10
+-    {py3.10,py3.10-dist,py3.10-dist-wheel}: python3.10
+-    {py3.11,py3.11-dist,py3.11-dist-wheel}: python3.11
++    {py3.14-dev,py3.14-dist-wheel}: python3.14
++    {py3.13-dev,py3.13-dist-wheel}: python3.13
+     {py3.12,py3.12-dist,py3.12-dist-wheel}: python3.12
+-    {py3.13-dev,py3.13-dev-dist,py3.13-dev-dist-wheel}: python3.13
++    {py3.11,py3.11-dist,py3.11-dist-wheel}: python3.11
++    {py3.10,py3.10-dist,py3.10-dist-wheel}: python3.10
+     {py3.14-dev,py3.14-dev-dist,py3.14-dev-dist-wheel}: python3.14
+ setenv =
+   CRYPTOGRAPHY_ALLOW_OPENSSL_102=1

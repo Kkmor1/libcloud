@@ -198,8 +198,8 @@ class Container:
         # type: (str) -> Object
         return self.driver.get_object(container_name=self.name, object_name=object_name)
 
-    def upload_object(self, file_path, object_name, extra=None, verify_hash=True, headers=None):
-        # type: (str, str, Optional[dict], bool, Optional[Dict[str, str]]) -> Object  # noqa: E501
+    def upload_object(self, file_path, object_name, extra=None, verify_hash=True, headers=None, progress_callback=None):
+        # type: (str, str, Optional[dict], bool, Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
         return self.driver.upload_object(
             file_path,
             self,
@@ -207,12 +207,13 @@ class Container:
             extra=extra,
             verify_hash=verify_hash,
             headers=headers,
+            progress_callback=progress_callback,
         )
 
-    def upload_object_via_stream(self, iterator, object_name, extra=None, headers=None):
-        # type: (Iterator[bytes], str, Optional[dict], Optional[Dict[str, str]]) -> Object  # noqa: E501
+    def upload_object_via_stream(self, iterator, object_name, extra=None, headers=None, progress_callback=None):
+        # type: (Iterator[bytes], str, Optional[dict], Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
         return self.driver.upload_object_via_stream(
-            iterator, self, object_name, extra=extra, headers=headers
+            iterator, self, object_name, extra=extra, headers=headers, progress_callback=progress_callback
         )
 
     def download_object(
@@ -564,8 +565,9 @@ class StorageDriver(BaseDriver):
         extra=None,
         verify_hash=True,
         headers=None,
+        progress_callback=None,
     ):
-        # type: (str, Container, str, Optional[dict], bool, Optional[Dict[str, str]]) -> Object  # noqa: E501
+        # type: (str, Container, str, Optional[dict], bool, Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
         """
         Upload an object currently located on a disk.
 
@@ -588,13 +590,18 @@ class StorageDriver(BaseDriver):
             such as CORS headers. For example:
             headers = {'Access-Control-Allow-Origin': 'http://mozilla.com'}
         :type headers: ``dict``
+        
+        :param progress_callback: (optional) A callback function that takes
+            two arguments: bytes_uploaded and total_bytes. It's called as the
+            upload progresses.
+        :type progress_callback: ``callable``
 
         :rtype: :class:`libcloud.storage.base.Object`
         """
         raise NotImplementedError("upload_object not implemented for this driver")
 
-    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
-        # type: (Iterator[bytes], Container, str, Optional[dict], Optional[Dict[str, str]]) -> Object  # noqa: E501
+    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None, progress_callback=None):
+        # type: (Iterator[bytes], Container, str, Optional[dict], Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
         """
         Upload an object using an iterator.
 
@@ -630,6 +637,11 @@ class StorageDriver(BaseDriver):
             such as CORS headers. For example:
             headers = {'Access-Control-Allow-Origin': 'http://mozilla.com'}
         :type headers: ``dict``
+        
+        :param progress_callback: (optional) A callback function that takes
+            two arguments: bytes_uploaded and total_bytes. It's called as the
+            upload progresses.
+        :type progress_callback: ``callable``
 
         :rtype: ``libcloud.storage.base.Object``
         """
@@ -805,6 +817,7 @@ class StorageDriver(BaseDriver):
         stream=None,
         chunked=False,
         multipart=False,
+        progress_callback=None,
     ):
         """
         Helper function for setting common request headers and calling the
@@ -822,7 +835,51 @@ class StorageDriver(BaseDriver):
             content_type, object_name, file_path=file_path
         )
 
+        total_size = None
+        if file_path:
+            total_size = os.path.getsize(file_path)
+
+        # 简单的进度回调包装类，其他驱动可以参考 oss.py 中的更完整实现
+        class SimpleProgressWrapper:
+            def __init__(self, file_obj, callback, total):
+                self.file = file_obj
+                self.callback = callback
+                self.total = total
+                self.bytes_read = 0
+
+            def read(self, size=-1):
+                data = self.file.read(size)
+                self.bytes_read += len(data)
+                if self.callback:
+                    self.callback(self.bytes_read, self.total)
+                return data
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                data = self.file.__next__()
+                self.bytes_read += len(data)
+                if self.callback:
+                    self.callback(self.bytes_read, self.total)
+                return data
+
+            # 为Python 2支持
+            next = __next__
+
         if stream:
+            # 对于流，我们先计算哈希，然后再上传
+            stream_hash, stream_length = self._hash_buffered_stream(
+                stream, self._get_hash_function()
+            )
+            # 重置流
+            if hasattr(stream, "seek"):
+                try:
+                    stream.seek(0)
+                except OSError:
+                    pass
+            
+            # 上传流
             response = self.connection.request(
                 request_path,
                 method=request_method,
@@ -830,15 +887,13 @@ class StorageDriver(BaseDriver):
                 headers=headers,
                 raw=True,
             )
-            stream_hash, stream_length = self._hash_buffered_stream(
-                stream, self._get_hash_function()
-            )
         else:
             with open(file_path, "rb") as file_stream:
+                wrapped_file = SimpleProgressWrapper(file_stream, progress_callback, total_size)
                 response = self.connection.request(
                     request_path,
                     method=request_method,
-                    data=file_stream,
+                    data=wrapped_file,
                     headers=headers,
                     raw=True,
                 )

@@ -451,6 +451,7 @@ class OSSStorageDriver(StorageDriver):
         extra=None,
         verify_hash=True,
         headers=None,
+        progress_callback=None,
     ):
         return self._put_object(
             container=container,
@@ -458,9 +459,10 @@ class OSSStorageDriver(StorageDriver):
             extra=extra,
             file_path=file_path,
             verify_hash=verify_hash,
+            progress_callback=progress_callback,
         )
 
-    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
+    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None, progress_callback=None):
         method = "PUT"
         params = None
 
@@ -476,6 +478,7 @@ class OSSStorageDriver(StorageDriver):
             stream=iterator,
             verify_hash=False,
             headers=headers,
+            progress_callback=progress_callback,
         )
 
     def delete_object(self, obj):
@@ -600,6 +603,7 @@ class OSSStorageDriver(StorageDriver):
         chunked=False,
         multipart=False,
         container=None,
+        progress_callback=None,
     ):
         """
         Helper function for setting common request headers and calling the
@@ -617,24 +621,105 @@ class OSSStorageDriver(StorageDriver):
             content_type, object_name, file_path=file_path
         )
 
+        total_size = None
+        if file_path:
+            total_size = os.path.getsize(file_path)
+
         if stream:
+            # 对于流，我们需要先读取并处理数据，同时跟踪进度
+            # 创建一个包装流来跟踪进度
+            class ProgressStreamWrapper:
+                def __init__(self, stream_obj, callback, total):
+                    self.stream = stream_obj
+                    self.callback = callback
+                    self.total = total
+                    self.bytes_read = 0
+                    # 如果流支持seek，我们可以重置它
+                    if hasattr(stream_obj, "seek"):
+                        try:
+                            stream_obj.seek(0)
+                        except OSError:
+                            pass
+
+                def read(self, size=-1):
+                    data = self.stream.read(size)
+                    self.bytes_read += len(data)
+                    if self.callback:
+                        self.callback(self.bytes_read, self.total)
+                    return data
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    data = self.stream.__next__()
+                    self.bytes_read += len(data)
+                    if self.callback:
+                        self.callback(self.bytes_read, self.total)
+                    return data
+
+                # 为Python 2支持
+                next = __next__
+
+            # 先包装流，读取计算哈希
+            wrapped_stream = ProgressStreamWrapper(stream, progress_callback, total_size)
+            stream_hash, stream_length = self._hash_buffered_stream(
+                wrapped_stream, self._get_hash_function()
+            )
+
+            # 重置流
+            if hasattr(stream, "seek"):
+                try:
+                    stream.seek(0)
+                except OSError:
+                    # 无法重置流，我们需要重新读取数据
+                    raise ValueError("Stream does not support seek, cannot re-read data")
+
+            # 重新包装并上传
+            upload_stream = ProgressStreamWrapper(stream, progress_callback, total_size)
             response = self.connection.request(
                 request_path,
                 method=request_method,
-                data=stream,
+                data=upload_stream,
                 headers=headers,
                 raw=True,
                 container=container,
             )
-            stream_hash, stream_length = self._hash_buffered_stream(
-                stream, self._get_hash_function()
-            )
         else:
+            # 对于文件，我们也创建一个包装器
+            class ProgressFileWrapper:
+                def __init__(self, file_obj, callback, total):
+                    self.file = file_obj
+                    self.callback = callback
+                    self.total = total
+                    self.bytes_read = 0
+
+                def read(self, size=-1):
+                    data = self.file.read(size)
+                    self.bytes_read += len(data)
+                    if self.callback:
+                        self.callback(self.bytes_read, self.total)
+                    return data
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    data = self.file.__next__()
+                    self.bytes_read += len(data)
+                    if self.callback:
+                        self.callback(self.bytes_read, self.total)
+                    return data
+
+                # 为Python 2支持
+                next = __next__
+
             with open(file_path, "rb") as file_stream:
+                wrapped_file = ProgressFileWrapper(file_stream, progress_callback, total_size)
                 response = self.connection.request(
                     request_path,
                     method=request_method,
-                    data=file_stream,
+                    data=wrapped_file,
                     headers=headers,
                     raw=True,
                     container=container,
@@ -661,6 +746,7 @@ class OSSStorageDriver(StorageDriver):
         stream=None,
         verify_hash=False,
         headers=None,
+        progress_callback=None,
     ):
         """
         Create an object and upload data using the given function.
@@ -696,6 +782,7 @@ class OSSStorageDriver(StorageDriver):
             file_path=file_path,
             stream=stream,
             container=container,
+            progress_callback=progress_callback,
         )
 
         response = result_dict["response"]
@@ -731,7 +818,7 @@ class OSSStorageDriver(StorageDriver):
             )
 
     def _upload_multipart(
-        self, response, data, iterator, container, object_name, calculate_hash=True
+        self, response, data, iterator, container, object_name, calculate_hash=True, progress_callback=None
     ):
         """
         Callback invoked for uploading data to OSS using Aliyun's
@@ -755,6 +842,9 @@ class OSSStorageDriver(StorageDriver):
 
         :keyword calculate_hash: Indicates if we must calculate the data hash
         :type calculate_hash: ``bool``
+        
+        :keyword progress_callback: Callback function to track upload progress
+        :type progress_callback: ``function``
 
         :return: A tuple of (status, checksum, bytes transferred)
         :rtype: ``tuple``
@@ -770,7 +860,7 @@ class OSSStorageDriver(StorageDriver):
         try:
             # Upload the data through the iterator
             result = self._upload_from_iterator(
-                iterator, object_path, upload_id, calculate_hash, container=container
+                iterator, object_path, upload_id, calculate_hash, container=container, progress_callback=progress_callback
             )
             chunks, data_hash, bytes_transferred = result
 
@@ -788,7 +878,7 @@ class OSSStorageDriver(StorageDriver):
         return (True, data_hash, bytes_transferred)
 
     def _upload_from_iterator(
-        self, iterator, object_path, upload_id, calculate_hash=True, container=None
+        self, iterator, object_path, upload_id, calculate_hash=True, container=None, progress_callback=None
     ):
         """
         Uploads data from an iterator in fixed sized chunks to OSS
@@ -807,6 +897,9 @@ class OSSStorageDriver(StorageDriver):
 
         :keyword container: the container object to upload object to
         :type container: :class:`Container`
+        
+        :keyword progress_callback: Callback function to track upload progress
+        :type progress_callback: ``function``
 
         :return: A tuple of (chunk info, checksum, bytes transferred)
         :rtype: ``tuple``
@@ -820,6 +913,10 @@ class OSSStorageDriver(StorageDriver):
         count = 1
         chunks = []
         params = {"uploadId": upload_id}
+
+        # 对于分片上传，我们需要先计算总大小，以提供给回调
+        # 注意：对于某些迭代器，我们可能无法预先知道总大小
+        total_size = None
 
         # Read the input data in chunk sizes suitable for AWS
         for data in read_in_chunks(
@@ -857,6 +954,10 @@ class OSSStorageDriver(StorageDriver):
             # Keep this data for a later commit
             chunks.append((count, server_hash))
             count += 1
+            
+            # 调用进度回调
+            if progress_callback:
+                progress_callback(bytes_transferred, total_size)
 
         if calculate_hash:
             data_hash = data_hash.hexdigest()

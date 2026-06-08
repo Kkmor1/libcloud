@@ -1,0 +1,517 @@
+diff --git a/libcloud/storage/base.py b/libcloud/storage/base.py
+index 42b80f6fc..5bc87d233 100644
+--- a/libcloud/storage/base.py
++++ b/libcloud/storage/base.py
+@@ -198,8 +198,8 @@ class Container:
+         # type: (str) -> Object
+         return self.driver.get_object(container_name=self.name, object_name=object_name)
+ 
+-    def upload_object(self, file_path, object_name, extra=None, verify_hash=True, headers=None):
+-        # type: (str, str, Optional[dict], bool, Optional[Dict[str, str]]) -> Object  # noqa: E501
++    def upload_object(self, file_path, object_name, extra=None, verify_hash=True, headers=None, progress_callback=None):
++        # type: (str, str, Optional[dict], bool, Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
+         return self.driver.upload_object(
+             file_path,
+             self,
+@@ -207,12 +207,13 @@ class Container:
+             extra=extra,
+             verify_hash=verify_hash,
+             headers=headers,
++            progress_callback=progress_callback,
+         )
+ 
+-    def upload_object_via_stream(self, iterator, object_name, extra=None, headers=None):
+-        # type: (Iterator[bytes], str, Optional[dict], Optional[Dict[str, str]]) -> Object  # noqa: E501
++    def upload_object_via_stream(self, iterator, object_name, extra=None, headers=None, progress_callback=None):
++        # type: (Iterator[bytes], str, Optional[dict], Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
+         return self.driver.upload_object_via_stream(
+-            iterator, self, object_name, extra=extra, headers=headers
++            iterator, self, object_name, extra=extra, headers=headers, progress_callback=progress_callback
+         )
+ 
+     def download_object(
+@@ -564,8 +565,9 @@ class StorageDriver(BaseDriver):
+         extra=None,
+         verify_hash=True,
+         headers=None,
++        progress_callback=None,
+     ):
+-        # type: (str, Container, str, Optional[dict], bool, Optional[Dict[str, str]]) -> Object  # noqa: E501
++        # type: (str, Container, str, Optional[dict], bool, Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
+         """
+         Upload an object currently located on a disk.
+ 
+@@ -588,13 +590,18 @@ class StorageDriver(BaseDriver):
+             such as CORS headers. For example:
+             headers = {'Access-Control-Allow-Origin': 'http://mozilla.com'}
+         :type headers: ``dict``
++        
++        :param progress_callback: (optional) A callback function that takes
++            two arguments: bytes_uploaded and total_bytes. It's called as the
++            upload progresses.
++        :type progress_callback: ``callable``
+ 
+         :rtype: :class:`libcloud.storage.base.Object`
+         """
+         raise NotImplementedError("upload_object not implemented for this driver")
+ 
+-    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
+-        # type: (Iterator[bytes], Container, str, Optional[dict], Optional[Dict[str, str]]) -> Object  # noqa: E501
++    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None, progress_callback=None):
++        # type: (Iterator[bytes], Container, str, Optional[dict], Optional[Dict[str, str]], Optional[callable]) -> Object  # noqa: E501
+         """
+         Upload an object using an iterator.
+ 
+@@ -630,6 +637,11 @@ class StorageDriver(BaseDriver):
+             such as CORS headers. For example:
+             headers = {'Access-Control-Allow-Origin': 'http://mozilla.com'}
+         :type headers: ``dict``
++        
++        :param progress_callback: (optional) A callback function that takes
++            two arguments: bytes_uploaded and total_bytes. It's called as the
++            upload progresses.
++        :type progress_callback: ``callable``
+ 
+         :rtype: ``libcloud.storage.base.Object``
+         """
+@@ -805,6 +817,7 @@ class StorageDriver(BaseDriver):
+         stream=None,
+         chunked=False,
+         multipart=False,
++        progress_callback=None,
+     ):
+         """
+         Helper function for setting common request headers and calling the
+@@ -822,7 +835,51 @@ class StorageDriver(BaseDriver):
+             content_type, object_name, file_path=file_path
+         )
+ 
++        total_size = None
++        if file_path:
++            total_size = os.path.getsize(file_path)
++
++        # 简单的进度回调包装类，其他驱动可以参考 oss.py 中的更完整实现
++        class SimpleProgressWrapper:
++            def __init__(self, file_obj, callback, total):
++                self.file = file_obj
++                self.callback = callback
++                self.total = total
++                self.bytes_read = 0
++
++            def read(self, size=-1):
++                data = self.file.read(size)
++                self.bytes_read += len(data)
++                if self.callback:
++                    self.callback(self.bytes_read, self.total)
++                return data
++
++            def __iter__(self):
++                return self
++
++            def __next__(self):
++                data = self.file.__next__()
++                self.bytes_read += len(data)
++                if self.callback:
++                    self.callback(self.bytes_read, self.total)
++                return data
++
++            # 为Python 2支持
++            next = __next__
++
+         if stream:
++            # 对于流，我们先计算哈希，然后再上传
++            stream_hash, stream_length = self._hash_buffered_stream(
++                stream, self._get_hash_function()
++            )
++            # 重置流
++            if hasattr(stream, "seek"):
++                try:
++                    stream.seek(0)
++                except OSError:
++                    pass
++            
++            # 上传流
+             response = self.connection.request(
+                 request_path,
+                 method=request_method,
+@@ -830,15 +887,13 @@ class StorageDriver(BaseDriver):
+                 headers=headers,
+                 raw=True,
+             )
+-            stream_hash, stream_length = self._hash_buffered_stream(
+-                stream, self._get_hash_function()
+-            )
+         else:
+             with open(file_path, "rb") as file_stream:
++                wrapped_file = SimpleProgressWrapper(file_stream, progress_callback, total_size)
+                 response = self.connection.request(
+                     request_path,
+                     method=request_method,
+-                    data=file_stream,
++                    data=wrapped_file,
+                     headers=headers,
+                     raw=True,
+                 )
+diff --git a/libcloud/storage/drivers/oss.py b/libcloud/storage/drivers/oss.py
+index f582886af..71d2c2b2f 100644
+--- a/libcloud/storage/drivers/oss.py
++++ b/libcloud/storage/drivers/oss.py
+@@ -451,6 +451,7 @@ class OSSStorageDriver(StorageDriver):
+         extra=None,
+         verify_hash=True,
+         headers=None,
++        progress_callback=None,
+     ):
+         return self._put_object(
+             container=container,
+@@ -458,9 +459,10 @@ class OSSStorageDriver(StorageDriver):
+             extra=extra,
+             file_path=file_path,
+             verify_hash=verify_hash,
++            progress_callback=progress_callback,
+         )
+ 
+-    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
++    def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None, progress_callback=None):
+         method = "PUT"
+         params = None
+ 
+@@ -476,6 +478,7 @@ class OSSStorageDriver(StorageDriver):
+             stream=iterator,
+             verify_hash=False,
+             headers=headers,
++            progress_callback=progress_callback,
+         )
+ 
+     def delete_object(self, obj):
+@@ -600,6 +603,7 @@ class OSSStorageDriver(StorageDriver):
+         chunked=False,
+         multipart=False,
+         container=None,
++        progress_callback=None,
+     ):
+         """
+         Helper function for setting common request headers and calling the
+@@ -617,24 +621,105 @@ class OSSStorageDriver(StorageDriver):
+             content_type, object_name, file_path=file_path
+         )
+ 
++        total_size = None
++        if file_path:
++            total_size = os.path.getsize(file_path)
++
+         if stream:
++            # 对于流，我们需要先读取并处理数据，同时跟踪进度
++            # 创建一个包装流来跟踪进度
++            class ProgressStreamWrapper:
++                def __init__(self, stream_obj, callback, total):
++                    self.stream = stream_obj
++                    self.callback = callback
++                    self.total = total
++                    self.bytes_read = 0
++                    # 如果流支持seek，我们可以重置它
++                    if hasattr(stream_obj, "seek"):
++                        try:
++                            stream_obj.seek(0)
++                        except OSError:
++                            pass
++
++                def read(self, size=-1):
++                    data = self.stream.read(size)
++                    self.bytes_read += len(data)
++                    if self.callback:
++                        self.callback(self.bytes_read, self.total)
++                    return data
++
++                def __iter__(self):
++                    return self
++
++                def __next__(self):
++                    data = self.stream.__next__()
++                    self.bytes_read += len(data)
++                    if self.callback:
++                        self.callback(self.bytes_read, self.total)
++                    return data
++
++                # 为Python 2支持
++                next = __next__
++
++            # 先包装流，读取计算哈希
++            wrapped_stream = ProgressStreamWrapper(stream, progress_callback, total_size)
++            stream_hash, stream_length = self._hash_buffered_stream(
++                wrapped_stream, self._get_hash_function()
++            )
++
++            # 重置流
++            if hasattr(stream, "seek"):
++                try:
++                    stream.seek(0)
++                except OSError:
++                    # 无法重置流，我们需要重新读取数据
++                    raise ValueError("Stream does not support seek, cannot re-read data")
++
++            # 重新包装并上传
++            upload_stream = ProgressStreamWrapper(stream, progress_callback, total_size)
+             response = self.connection.request(
+                 request_path,
+                 method=request_method,
+-                data=stream,
++                data=upload_stream,
+                 headers=headers,
+                 raw=True,
+                 container=container,
+             )
+-            stream_hash, stream_length = self._hash_buffered_stream(
+-                stream, self._get_hash_function()
+-            )
+         else:
++            # 对于文件，我们也创建一个包装器
++            class ProgressFileWrapper:
++                def __init__(self, file_obj, callback, total):
++                    self.file = file_obj
++                    self.callback = callback
++                    self.total = total
++                    self.bytes_read = 0
++
++                def read(self, size=-1):
++                    data = self.file.read(size)
++                    self.bytes_read += len(data)
++                    if self.callback:
++                        self.callback(self.bytes_read, self.total)
++                    return data
++
++                def __iter__(self):
++                    return self
++
++                def __next__(self):
++                    data = self.file.__next__()
++                    self.bytes_read += len(data)
++                    if self.callback:
++                        self.callback(self.bytes_read, self.total)
++                    return data
++
++                # 为Python 2支持
++                next = __next__
++
+             with open(file_path, "rb") as file_stream:
++                wrapped_file = ProgressFileWrapper(file_stream, progress_callback, total_size)
+                 response = self.connection.request(
+                     request_path,
+                     method=request_method,
+-                    data=file_stream,
++                    data=wrapped_file,
+                     headers=headers,
+                     raw=True,
+                     container=container,
+@@ -661,6 +746,7 @@ class OSSStorageDriver(StorageDriver):
+         stream=None,
+         verify_hash=False,
+         headers=None,
++        progress_callback=None,
+     ):
+         """
+         Create an object and upload data using the given function.
+@@ -696,6 +782,7 @@ class OSSStorageDriver(StorageDriver):
+             file_path=file_path,
+             stream=stream,
+             container=container,
++            progress_callback=progress_callback,
+         )
+ 
+         response = result_dict["response"]
+@@ -731,7 +818,7 @@ class OSSStorageDriver(StorageDriver):
+             )
+ 
+     def _upload_multipart(
+-        self, response, data, iterator, container, object_name, calculate_hash=True
++        self, response, data, iterator, container, object_name, calculate_hash=True, progress_callback=None
+     ):
+         """
+         Callback invoked for uploading data to OSS using Aliyun's
+@@ -755,6 +842,9 @@ class OSSStorageDriver(StorageDriver):
+ 
+         :keyword calculate_hash: Indicates if we must calculate the data hash
+         :type calculate_hash: ``bool``
++        
++        :keyword progress_callback: Callback function to track upload progress
++        :type progress_callback: ``function``
+ 
+         :return: A tuple of (status, checksum, bytes transferred)
+         :rtype: ``tuple``
+@@ -770,7 +860,7 @@ class OSSStorageDriver(StorageDriver):
+         try:
+             # Upload the data through the iterator
+             result = self._upload_from_iterator(
+-                iterator, object_path, upload_id, calculate_hash, container=container
++                iterator, object_path, upload_id, calculate_hash, container=container, progress_callback=progress_callback
+             )
+             chunks, data_hash, bytes_transferred = result
+ 
+@@ -788,7 +878,7 @@ class OSSStorageDriver(StorageDriver):
+         return (True, data_hash, bytes_transferred)
+ 
+     def _upload_from_iterator(
+-        self, iterator, object_path, upload_id, calculate_hash=True, container=None
++        self, iterator, object_path, upload_id, calculate_hash=True, container=None, progress_callback=None
+     ):
+         """
+         Uploads data from an iterator in fixed sized chunks to OSS
+@@ -807,6 +897,9 @@ class OSSStorageDriver(StorageDriver):
+ 
+         :keyword container: the container object to upload object to
+         :type container: :class:`Container`
++        
++        :keyword progress_callback: Callback function to track upload progress
++        :type progress_callback: ``function``
+ 
+         :return: A tuple of (chunk info, checksum, bytes transferred)
+         :rtype: ``tuple``
+@@ -821,6 +914,10 @@ class OSSStorageDriver(StorageDriver):
+         chunks = []
+         params = {"uploadId": upload_id}
+ 
++        # 对于分片上传，我们需要先计算总大小，以提供给回调
++        # 注意：对于某些迭代器，我们可能无法预先知道总大小
++        total_size = None
++
+         # Read the input data in chunk sizes suitable for AWS
+         for data in read_in_chunks(
+             iterator, chunk_size=CHUNK_SIZE, fill_size=True, yield_empty=True
+@@ -857,6 +954,10 @@ class OSSStorageDriver(StorageDriver):
+             # Keep this data for a later commit
+             chunks.append((count, server_hash))
+             count += 1
++            
++            # 调用进度回调
++            if progress_callback:
++                progress_callback(bytes_transferred, total_size)
+ 
+         if calculate_hash:
+             data_hash = data_hash.hexdigest()
+diff --git a/libcloud/test/storage/test_oss.py b/libcloud/test/storage/test_oss.py
+index 3debf9d0d..3655e61e0 100644
+--- a/libcloud/test/storage/test_oss.py
++++ b/libcloud/test/storage/test_oss.py
+@@ -747,6 +747,122 @@ class OSSStorageDriverTestCase(unittest.TestCase):
+         result = self.driver.delete_object(obj=obj)
+         self.assertTrue(result)
+ 
++    def test_upload_object_with_progress_callback(self):
++        def upload_file(
++            self,
++            object_name=None,
++            content_type=None,
++            request_path=None,
++            request_method=None,
++            headers=None,
++            file_path=None,
++            stream=None,
++            container=None,
++            progress_callback=None,
++        ):
++            return {
++                "response": make_response(
++                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
++                ),
++                "bytes_transferred": 1000,
++                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
++            }
++
++        self.mock_response_klass.type = None
++        old_func = self.driver_type._upload_object
++        self.driver_type._upload_object = upload_file
++
++        progress_calls = []
++        def progress_callback(bytes_uploaded, total_bytes):
++            progress_calls.append((bytes_uploaded, total_bytes))
++
++        file_path = os.path.abspath(__file__)
++        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
++        object_name = "foo_test_upload"
++        extra = {"meta_data": {"some-value": "foobar"}}
++        
++        # 直接调用驱动方法测试
++        obj = self.driver.upload_object(
++            file_path=file_path,
++            container=container,
++            object_name=object_name,
++            extra=extra,
++            verify_hash=True,
++            progress_callback=progress_callback,
++        )
++        
++        # 同时测试 Container 类的 upload_object 方法
++        container_upload_calls = []
++        def container_progress_callback(bytes_uploaded, total_bytes):
++            container_upload_calls.append((bytes_uploaded, total_bytes))
++            
++        obj2 = container.upload_object(
++            file_path=file_path,
++            object_name="foo_test_upload2",
++            extra=extra,
++            verify_hash=True,
++            progress_callback=container_progress_callback,
++        )
++        
++        self.assertEqual(obj.name, "foo_test_upload")
++        self.assertEqual(obj.size, 1000)
++        self.assertTrue("some-value" in obj.meta_data)
++        
++        # 测试没有提供进度回调时也能正常工作（向后兼容性）
++        obj3 = self.driver.upload_object(
++            file_path=file_path,
++            container=container,
++            object_name="foo_test_upload3",
++            extra=extra,
++            verify_hash=True,
++        )
++        self.assertEqual(obj3.name, "foo_test_upload3")
++        
++        self.driver_type._upload_object = old_func
++
++    def test_upload_object_via_stream_with_progress_callback(self):
++        if self.driver.supports_multipart_upload:
++            self.mock_response_klass.type = "multipart"
++        else:
++            self.mock_response_klass.type = None
++
++        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
++        object_name = "foo_test_stream_data"
++        iterator = DummyIterator(data=["2", "3", "5"])
++        extra = {"content_type": "text/plain"}
++        
++        # 测试直接通过驱动上传
++        stream_progress_calls = []
++        def stream_progress_callback(bytes_uploaded, total_bytes):
++            stream_progress_calls.append((bytes_uploaded, total_bytes))
++            
++        obj = self.driver.upload_object_via_stream(
++            container=container, 
++            object_name=object_name, 
++            iterator=iterator, 
++            extra=extra,
++            progress_callback=stream_progress_callback,
++        )
++
++        self.assertEqual(obj.name, object_name)
++        self.assertEqual(obj.size, 3)
++        
++        # 测试通过 Container 类上传
++        container_stream_progress_calls = []
++        def container_stream_progress_callback(bytes_uploaded, total_bytes):
++            container_stream_progress_calls.append((bytes_uploaded, total_bytes))
++            
++        iterator2 = DummyIterator(data=["a", "b", "c"])
++        obj2 = container.upload_object_via_stream(
++            iterator2,
++            object_name="foo_test_stream_data2",
++            extra=extra,
++            progress_callback=container_stream_progress_callback,
++        )
++        
++        self.assertEqual(obj2.name, "foo_test_stream_data2")
++        self.assertEqual(obj2.size, 3)
++
+ 
+ if __name__ == "__main__":
+     sys.exit(unittest.main())

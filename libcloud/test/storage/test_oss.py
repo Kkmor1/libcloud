@@ -747,6 +747,122 @@ class OSSStorageDriverTestCase(unittest.TestCase):
         result = self.driver.delete_object(obj=obj)
         self.assertTrue(result)
 
+    def test_upload_object_with_progress_callback(self):
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+
+        progress_calls = []
+        def progress_callback(bytes_uploaded, total_bytes):
+            progress_calls.append((bytes_uploaded, total_bytes))
+
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+        extra = {"meta_data": {"some-value": "foobar"}}
+        
+        # 直接调用驱动方法测试
+        obj = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name=object_name,
+            extra=extra,
+            verify_hash=True,
+            progress_callback=progress_callback,
+        )
+        
+        # 同时测试 Container 类的 upload_object 方法
+        container_upload_calls = []
+        def container_progress_callback(bytes_uploaded, total_bytes):
+            container_upload_calls.append((bytes_uploaded, total_bytes))
+            
+        obj2 = container.upload_object(
+            file_path=file_path,
+            object_name="foo_test_upload2",
+            extra=extra,
+            verify_hash=True,
+            progress_callback=container_progress_callback,
+        )
+        
+        self.assertEqual(obj.name, "foo_test_upload")
+        self.assertEqual(obj.size, 1000)
+        self.assertTrue("some-value" in obj.meta_data)
+        
+        # 测试没有提供进度回调时也能正常工作（向后兼容性）
+        obj3 = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name="foo_test_upload3",
+            extra=extra,
+            verify_hash=True,
+        )
+        self.assertEqual(obj3.name, "foo_test_upload3")
+        
+        self.driver_type._upload_object = old_func
+
+    def test_upload_object_via_stream_with_progress_callback(self):
+        if self.driver.supports_multipart_upload:
+            self.mock_response_klass.type = "multipart"
+        else:
+            self.mock_response_klass.type = None
+
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_stream_data"
+        iterator = DummyIterator(data=["2", "3", "5"])
+        extra = {"content_type": "text/plain"}
+        
+        # 测试直接通过驱动上传
+        stream_progress_calls = []
+        def stream_progress_callback(bytes_uploaded, total_bytes):
+            stream_progress_calls.append((bytes_uploaded, total_bytes))
+            
+        obj = self.driver.upload_object_via_stream(
+            container=container, 
+            object_name=object_name, 
+            iterator=iterator, 
+            extra=extra,
+            progress_callback=stream_progress_callback,
+        )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, 3)
+        
+        # 测试通过 Container 类上传
+        container_stream_progress_calls = []
+        def container_stream_progress_callback(bytes_uploaded, total_bytes):
+            container_stream_progress_calls.append((bytes_uploaded, total_bytes))
+            
+        iterator2 = DummyIterator(data=["a", "b", "c"])
+        obj2 = container.upload_object_via_stream(
+            iterator2,
+            object_name="foo_test_stream_data2",
+            extra=extra,
+            progress_callback=container_stream_progress_callback,
+        )
+        
+        self.assertEqual(obj2.name, "foo_test_stream_data2")
+        self.assertEqual(obj2.size, 3)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

@@ -17,6 +17,7 @@ import ssl
 import time
 import socket
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -140,6 +141,7 @@ class MinimalRetry:
         return False
 
 
+
 class Retry(MinimalRetry):
     def __init__(
         self,
@@ -225,3 +227,35 @@ class RetryForeverOnRateLimitError(Retry):
                         raise
 
         return retry_loop
+
+def retry_on_exception(max_retries=3, retry_delay=1, retry_exceptions=Exception):
+    def decorator(func):
+        if asyncio.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                executed = 0
+                while True:
+                    try:
+                        executed += 1
+                        return await func(*args, **kwargs)
+                    except retry_exceptions as e:
+                        _logger.debug("Function %s retry %d failed: %s", func.__name__, executed, str(e))
+                        if executed >= max(1, max_retries):
+                            raise
+                        await asyncio.sleep(retry_delay)
+            return async_wrapper
+        else:
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                executed = 0
+                while True:
+                    try:
+                        executed += 1
+                        return func(*args, **kwargs)
+                    except retry_exceptions as e:
+                        _logger.debug("Function %s retry %d failed: %s", func.__name__, executed, str(e))
+                        if executed >= max(1, max_retries):
+                            raise
+                        time.sleep(retry_delay)
+            return sync_wrapper
+    return decorator

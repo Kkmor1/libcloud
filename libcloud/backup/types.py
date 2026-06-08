@@ -28,6 +28,7 @@ class Provider:
     DIMENSIONDATA = "dimensiondata"
     EBS = "ebs"
     GCE = "gce"
+    ALIYUN = "aliyun"
 
 
 class BackupTargetType:

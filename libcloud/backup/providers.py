@@ -25,6 +25,7 @@ DRIVERS = {
         "libcloud.backup.drivers.dimensiondata",
         "DimensionDataBackupDriver",
     ),
+    Provider.ALIYUN: ("libcloud.backup.drivers.aliyun", "AliyunBackupDriver"),
 }
 
 

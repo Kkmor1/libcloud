@@ -1,0 +1,24 @@
+diff --git a/libcloud/backup/providers.py b/libcloud/backup/providers.py
+index 8a56f0112..a6a23a44c 100644
+--- a/libcloud/backup/providers.py
++++ b/libcloud/backup/providers.py
+@@ -25,6 +25,7 @@ DRIVERS = {
+         "libcloud.backup.drivers.dimensiondata",
+         "DimensionDataBackupDriver",
+     ),
++    Provider.ALIYUN: ("libcloud.backup.drivers.aliyun", "AliyunBackupDriver"),
+ }
+ 
+ 
+diff --git a/libcloud/backup/types.py b/libcloud/backup/types.py
+index 912f90b52..35f139b51 100644
+--- a/libcloud/backup/types.py
++++ b/libcloud/backup/types.py
+@@ -28,6 +28,7 @@ class Provider:
+     DIMENSIONDATA = "dimensiondata"
+     EBS = "ebs"
+     GCE = "gce"
++    ALIYUN = "aliyun"
+ 
+ 
+ class BackupTargetType:

@@ -17,6 +17,7 @@ import ssl
 import time
 import socket
 import logging
+import inspect
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -26,7 +27,10 @@ from libcloud.common.exceptions import RateLimitReachedError
 __all__ = [
     "Retry",
     "RetryForeverOnRateLimitError",
+    "retry_on_exception",
 ]
+
+_logger = logging.getLogger(__name__)
 
 _logger = logging.getLogger(__name__)
 # Error message which indicates a transient SSL error upon which request
@@ -225,3 +229,110 @@ class RetryForeverOnRateLimitError(Retry):
                         raise
 
         return retry_loop
+
+
+def retry_on_exception(
+    max_retries=3,
+    retry_exceptions=RETRY_EXCEPTIONS,
+    retry_delay=DEFAULT_DELAY,
+    backoff=DEFAULT_BACKOFF,
+):
+    """
+    一个装饰器，用于在发生指定异常时自动重试函数调用。
+
+    :param max_retries: 最大重试次数。默认为 3。注意：函数的首次调用不算重试。
+                        例如，max_retries=0 表示只尝试执行一次，不进行重试；
+                        max_retries=3 表示总共执行最多 4 次（1 次初始调用 + 3 次重试）。
+    :param retry_exceptions: 要捕获并重试的异常类型元组。
+    :param retry_delay: 重试之间的初始延迟（秒）。
+    :param backoff: 延迟递增倍数。
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            current_attempt = 0
+            current_delay = retry_delay
+
+            while True:
+                try:
+                    if current_attempt > 0:
+                        _logger.debug(
+                            "执行函数 %s，当前是第 %d 次尝试",
+                            func.__name__,
+                            current_attempt + 1
+                        )
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if not isinstance(e, tuple(retry_exceptions)):
+                        raise
+
+                    if current_attempt >= max_retries:
+                        _logger.debug(
+                            "函数 %s 已达到最大重试次数 %d 次，不再重试，抛出异常",
+                            func.__name__,
+                            max_retries
+                        )
+                        raise
+
+                    current_attempt += 1
+                    _logger.debug(
+                        "函数 %s 在第 %d 次尝试中捕获到异常 %s: %s，将在 %f 秒后重试",
+                        func.__name__,
+                        current_attempt,
+                        type(e).__name__,
+                        str(e),
+                        current_delay
+                    )
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            current_attempt = 0
+            current_delay = retry_delay
+
+            while True:
+                try:
+                    if current_attempt > 0:
+                        _logger.debug(
+                            "执行异步函数 %s，当前是第 %d 次尝试",
+                            func.__name__,
+                            current_attempt + 1
+                        )
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if not isinstance(e, tuple(retry_exceptions)):
+                        raise
+
+                    if current_attempt >= max_retries:
+                        _logger.debug(
+                            "异步函数 %s 已达到最大重试次数 %d 次，不再重试，抛出异常",
+                            func.__name__,
+                            max_retries
+                        )
+                        raise
+
+                    current_attempt += 1
+                    _logger.debug(
+                        "异步函数 %s 在第 %d 次尝试中捕获到异常 %s: %s，将在 %f 秒后重试",
+                        func.__name__,
+                        current_attempt,
+                        type(e).__name__,
+                        str(e),
+                        current_delay
+                    )
+                    await asyncio.sleep(current_delay)
+                    current_delay *= backoff
+
+        if inspect.iscoroutinefunction(func):
+            return async_wrapper
+        else:
+            return wrapper
+
+    return decorator
+
+
+try:
+    import asyncio
+except ImportError:
+    pass

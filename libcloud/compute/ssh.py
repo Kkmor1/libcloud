@@ -405,6 +405,7 @@ class ParamikoSSHClient(BaseSSHClient):
             # See https://www.paramiko.org/changelog.html for details.
             if (
                 PARAMIKO_VERSION_TUPLE >= (2, 9, 0)
+                and PARAMIKO_VERSION_TUPLE < (4, 0, 0)
                 and LIBCLOUD_PARAMIKO_SHA2_BACKWARD_COMPATIBILITY
             ):
                 self.logger.warn(SHA2_PUBKEY_NOT_SUPPORTED_AUTH_ERROR_MSG)

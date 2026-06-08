@@ -28,7 +28,6 @@ try:
     try:
         JSONDecodeError = json.JSONDecodeError
     except AttributeError:
-        # simplejson < 2.1.0 does not have the JSONDecodeError exception class
         JSONDecodeError = ValueError  # type: ignore
 except ImportError:
     import json  # type: ignore
@@ -38,13 +37,14 @@ except ImportError:
 __all__ = [
     "get_pricing",
     "get_size_price",
+    "get_storage_price",
     "get_image_price",
     "set_pricing",
+    "clear_pricing_cache",
     "clear_pricing_data",
     "download_pricing_file",
 ]
 
-# Default URL to the pricing file in a git repo
 DEFAULT_FILE_URL_GIT = "https://git.apache.org/repos/asf?p=libcloud.git;a=blob_plain;f=libcloud/data/pricing.json"  # NOQA
 
 DEFAULT_FILE_URL_S3_BUCKET = "https://libcloud-pricing-data.s3.amazonaws.com/pricing.json"  # NOQA
@@ -53,20 +53,238 @@ CURRENT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRICING_FILE_PATH = pjoin(CURRENT_DIRECTORY, "data/pricing.json")
 CUSTOM_PRICING_FILE_PATH = os.path.expanduser("~/.libcloud/pricing.json")
 
-# Pricing data cache
 PRICING_DATA = {"compute": {}, "storage": {}}  # type: Dict[str, Dict]
+_FILE_PRICING_CACHE = {}  # type: Dict[str, Dict[str, Dict[str, dict]]]
 
 VALID_PRICING_DRIVER_TYPES = ["compute", "storage"]
 
-# Set this to True to cache all the pricing data in memory instead of just the
-# one for the drivers which are used
 CACHE_ALL_PRICING_DATA = False
+
+
+class _JSONStreamReader:
+    def __init__(self, file_handle):
+        self.file_handle = file_handle
+        self.buffer = ""
+        self.chunk_size = 8192
+
+    def read(self, size=1):
+        while len(self.buffer) < size:
+            chunk = self.file_handle.read(max(self.chunk_size, size - len(self.buffer)))
+            if not chunk:
+                break
+            self.buffer += chunk
+
+        result = self.buffer[:size]
+        self.buffer = self.buffer[size:]
+        return result
+
+    def peek(self):
+        self._fill_buffer()
+        if not self.buffer:
+            return ""
+        return self.buffer[0]
+
+    def _fill_buffer(self):
+        if self.buffer:
+            return
+
+        chunk = self.file_handle.read(self.chunk_size)
+        if chunk:
+            self.buffer += chunk
+
+    def skip_whitespace(self):
+        while True:
+            char = self.peek()
+            if not char or not char.isspace():
+                return
+            self.read(1)
+
+    def expect(self, expected):
+        actual = self.read(1)
+        if actual != expected:
+            raise ValueError("Invalid pricing data")
+
+    def read_string(self):
+        return json.loads(self.read_string_text())
+
+    def read_string_text(self):
+        self.skip_whitespace()
+        self.expect('"')
+
+        result = ['"']
+        escaped = False
+
+        while True:
+            char = self.read(1)
+            if not char:
+                raise ValueError("Invalid pricing data")
+
+            result.append(char)
+
+            if escaped:
+                escaped = False
+                continue
+
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                break
+
+        return "".join(result)
+
+    def read_value_text(self):
+        self.skip_whitespace()
+        char = self.peek()
+
+        if char in ["{", "["]:
+            return self.read_container_text()
+
+        if char == '"':
+            return self.read_string_text()
+
+        return self.read_primitive_text()
+
+    def read_container_text(self):
+        self.skip_whitespace()
+        first_char = self.read(1)
+        if first_char not in ["{", "["]:
+            raise ValueError("Invalid pricing data")
+
+        result = [first_char]
+        stack = [first_char]
+        escaped = False
+        in_string = False
+
+        while stack:
+            char = self.read(1)
+            if not char:
+                raise ValueError("Invalid pricing data")
+
+            result.append(char)
+
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char in ["{", "["]:
+                stack.append(char)
+            elif char in ["}", "]"]:
+                expected = "}" if stack[-1] == "{" else "]"
+                if char != expected:
+                    raise ValueError("Invalid pricing data")
+                stack.pop()
+
+        return "".join(result)
+
+    def read_primitive_text(self):
+        self.skip_whitespace()
+
+        result = []
+        while True:
+            char = self.peek()
+            if not char or char.isspace() or char in [",", "}", "]"]:
+                break
+            result.append(self.read(1))
+
+        if not result:
+            raise ValueError("Invalid pricing data")
+
+        return "".join(result)
+
+    def skip_value(self):
+        self.read_value_text()
+
+
+def _normalize_pricing_file_path(pricing_file_path=None):
+    # type: (Optional[str]) -> str
+    pricing_file_path = pricing_file_path or get_pricing_file_path(file_path=pricing_file_path)
+    pricing_file_path = os.path.expanduser(pricing_file_path)
+    return os.path.abspath(pricing_file_path)
+
+
+def _get_file_pricing_cache(pricing_file_path):
+    # type: (str) -> Dict[str, Dict[str, dict]]
+    return _FILE_PRICING_CACHE.setdefault(pricing_file_path, {"compute": {}, "storage": {}})
+
+
+def _read_value_from_object(reader, target_key):
+    # type: (_JSONStreamReader, str) -> dict
+    reader.skip_whitespace()
+    reader.expect("{")
+    reader.skip_whitespace()
+
+    if reader.peek() == "}":
+        reader.read(1)
+        raise KeyError(target_key)
+
+    while True:
+        key = reader.read_string()
+        reader.skip_whitespace()
+        reader.expect(":")
+
+        if key == target_key:
+            return json.loads(reader.read_value_text())
+
+        reader.skip_value()
+        reader.skip_whitespace()
+
+        delimiter = reader.read(1)
+        if delimiter == "}":
+            break
+        if delimiter != ",":
+            raise ValueError("Invalid pricing data")
+
+    raise KeyError(target_key)
+
+
+def _load_driver_pricing(pricing_file_path, driver_type, driver_name):
+    # type: (str, str, str) -> dict
+    with open(pricing_file_path) as file_handle:
+        reader = _JSONStreamReader(file_handle=file_handle)
+        reader.skip_whitespace()
+        reader.expect("{")
+        reader.skip_whitespace()
+
+        if reader.peek() == "}":
+            reader.read(1)
+            raise KeyError(driver_type)
+
+        while True:
+            key = reader.read_string()
+            reader.skip_whitespace()
+            reader.expect(":")
+
+            if key == driver_type:
+                return _read_value_from_object(reader=reader, target_key=driver_name)
+
+            reader.skip_value()
+            reader.skip_whitespace()
+
+            delimiter = reader.read(1)
+            if delimiter == "}":
+                break
+            if delimiter != ",":
+                raise ValueError("Invalid pricing data")
+
+    raise KeyError(driver_type)
+
+
+def _load_all_pricing_data(pricing_file_path):
+    # type: (str) -> dict
+    with open(pricing_file_path) as file_handle:
+        return json.load(file_handle)
 
 
 def get_pricing_file_path(file_path=None):
     # type: (Optional[str]) -> str
     if os.path.exists(CUSTOM_PRICING_FILE_PATH) and os.path.isfile(CUSTOM_PRICING_FILE_PATH):
-        # Custom pricing file is available, use it
         return CUSTOM_PRICING_FILE_PATH
 
     return DEFAULT_PRICING_FILE_PATH
@@ -107,33 +325,37 @@ def get_pricing(driver_type, driver_name, pricing_file_path=None, cache_all=Fals
     if driver_type not in VALID_PRICING_DRIVER_TYPES:
         raise AttributeError("Invalid driver type: %s", driver_type)
 
-    if driver_name in PRICING_DATA[driver_type]:
+    resolved_pricing_file_path = _normalize_pricing_file_path(pricing_file_path=pricing_file_path)
+    file_cache = _get_file_pricing_cache(pricing_file_path=resolved_pricing_file_path)
+
+    if pricing_file_path is None and driver_name in PRICING_DATA[driver_type]:
         return PRICING_DATA[driver_type][driver_name]
 
-    if not pricing_file_path:
-        pricing_file_path = get_pricing_file_path(file_path=pricing_file_path)
-
-    with open(pricing_file_path) as fp:
-        content = fp.read()
-
-    pricing_data = json.loads(content)
-    driver_pricing = pricing_data[driver_type][driver_name]
-
-    # NOTE: We only cache prices in memory for the the requested drivers.
-    # This way we avoid storing massive pricing data for all the drivers in
-    # memory
+    if driver_name in file_cache[driver_type]:
+        return file_cache[driver_type][driver_name]
 
     if cache_all:
-        for driver_type in VALID_PRICING_DRIVER_TYPES:
-            # pylint: disable=maybe-no-member
-            pricing = pricing_data.get(driver_type, None)
+        pricing_data = _load_all_pricing_data(pricing_file_path=resolved_pricing_file_path)
+
+        for current_driver_type in VALID_PRICING_DRIVER_TYPES:
+            pricing = pricing_data.get(current_driver_type, None)
 
             if not pricing:
                 continue
 
-            PRICING_DATA[driver_type] = pricing
-    else:
-        set_pricing(driver_type=driver_type, driver_name=driver_name, pricing=driver_pricing)
+            file_cache[current_driver_type] = pricing
+            PRICING_DATA[current_driver_type].update(pricing)
+
+        return file_cache[driver_type][driver_name]
+
+    driver_pricing = _load_driver_pricing(
+        pricing_file_path=resolved_pricing_file_path,
+        driver_type=driver_type,
+        driver_name=driver_name,
+    )
+
+    file_cache[driver_type][driver_name] = driver_pricing
+    PRICING_DATA[driver_type][driver_name] = driver_pricing
 
     return driver_pricing
 
@@ -185,14 +407,25 @@ def get_size_price(driver_type, driver_name, size_id, region=None):
         else:
             price = float(pricing[size_id][region])
     except KeyError:
-        # Price not available
         price = None
 
     return price
 
 
+def get_storage_price(driver_name, size_id, region=None):
+    # type: (str, Union[str,int], Optional[str]) -> Optional[float]
+    """
+    Return price for the provided storage size.
+    """
+    return get_size_price(
+        driver_type="storage",
+        driver_name=driver_name,
+        size_id=size_id,
+        region=region,
+    )
+
+
 def get_image_price(driver_name, image_name, size_name=None, cores=1):
-    # for now only images of GCE have pricing data
     if driver_name == "gce_images":
         return _get_gce_image_price(image_name=image_name, size_name=size_name, cores=cores)
 
@@ -220,11 +453,9 @@ def _get_gce_image_price(image_name, size_name, cores=1):
     :return: Image price
     """
 
-    # helper function to get image family for gce images
     def _get_gce_image_family(image_name):
         image_family = None
 
-        # Decide if the image is a premium image
         if "sql" in image_name:
             image_family = "SQL Server"
         elif "windows" in image_name:
@@ -240,7 +471,6 @@ def _get_gce_image_price(image_name, size_name, cores=1):
         return image_family
 
     image_family = _get_gce_image_family(image_name)
-    # if there is no premium image return 0
     if not image_family:
         return 0
 
@@ -248,7 +478,6 @@ def _get_gce_image_price(image_name, size_name, cores=1):
     try:
         price_dict = pricing[image_family]
     except KeyError:
-        # Price not available
         return 0
 
     size_type = "any"
@@ -259,17 +488,13 @@ def _get_gce_image_price(image_name, size_name, cores=1):
 
     price_dict_keys = price_dict.keys()
 
-    # search keys to find the one we want
     for key in price_dict_keys:
         if key == "description":
             continue
-        # eg. 4vcpu or less
         if re.search(".{1}vcpu or less", key) and cores <= int(key[0]):
             return float(price_dict[key]["price"])
-        # eg. 1-2vcpu
         if re.search(".{1}-.{1}vcpu", key) and str(cores) in key:
             return float(price_dict[key]["price"])
-        # eg 6vcpu or more
         if re.search(".{1}vcpu or more", key) and cores >= int(key[0]):
             return float(price_dict[key]["price"])
         if key in {"standard", "enterprise", "web"} and key in image_name:
@@ -279,7 +504,6 @@ def _get_gce_image_price(image_name, size_name, cores=1):
         elif key == "any":
             price = float(price_dict[key]["price"])
             return price * cores if "sles" not in image_name else price
-    # fallback
     return 0
 
 
@@ -290,6 +514,15 @@ def invalidate_pricing_cache():
     """
     PRICING_DATA["compute"] = {}
     PRICING_DATA["storage"] = {}
+    _FILE_PRICING_CACHE.clear()
+
+
+def clear_pricing_cache():
+    # type: () -> None
+    """
+    Invalidate pricing cache for all the drivers.
+    """
+    invalidate_pricing_cache()
 
 
 def clear_pricing_data():
@@ -317,6 +550,10 @@ def invalidate_module_pricing_cache(driver_type, driver_name):
     if driver_name in PRICING_DATA[driver_type]:
         del PRICING_DATA[driver_type][driver_name]
 
+    for pricing_data in _FILE_PRICING_CACHE.values():
+        if driver_name in pricing_data[driver_type]:
+            del pricing_data[driver_type][driver_name]
+
 
 def download_pricing_file(file_url=DEFAULT_FILE_URL_S3_BUCKET, file_path=CUSTOM_PRICING_FILE_PATH):
     # type: (str, str) -> None
@@ -334,7 +571,6 @@ def download_pricing_file(file_url=DEFAULT_FILE_URL_S3_BUCKET, file_path=CUSTOM_
     dir_name = os.path.dirname(file_path)
 
     if not os.path.exists(dir_name):
-        # Verify a valid path is provided
         msg = "Can't write to {}, directory {}, doesn't exist".format(file_path, dir_name)
         raise ValueError(msg)
 
@@ -345,18 +581,15 @@ def download_pricing_file(file_url=DEFAULT_FILE_URL_S3_BUCKET, file_path=CUSTOM_
     response = get_response_object(file_url)
     body = response.body
 
-    # Verify pricing file is valid
     try:
         data = json.loads(body)
     except JSONDecodeError:
         msg = "Provided URL doesn't contain valid pricing data"
         raise Exception(msg)
 
-    # pylint: disable=maybe-no-member
     if not data.get("updated", None):
         msg = "Provided URL doesn't contain valid pricing data"
         raise Exception(msg)
 
-    # No need to stream it since file is small
     with open(file_path, "w") as file_handle:
         file_handle.write(body)

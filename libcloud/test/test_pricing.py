@@ -14,8 +14,12 @@
 # limitations under the License.
 
 import sys
+import json
+import os
 import os.path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import libcloud.pricing
 
@@ -26,7 +30,18 @@ class PricingTestCase(unittest.TestCase):
     def setUp(self):
         super().setUp()
 
-        libcloud.pricing.PRICING_DATA = {"compute": {}, "storage": {}}
+        libcloud.pricing.clear_pricing_cache()
+        libcloud.pricing.CACHE_ALL_PRICING_DATA = False
+
+    def _create_pricing_file(self, pricing_data):
+        file_handle = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        try:
+            json.dump(pricing_data, file_handle)
+        finally:
+            file_handle.close()
+
+        self.addCleanup(lambda: os.path.exists(file_handle.name) and os.unlink(file_handle.name))
+        return file_handle.name
 
     def test_get_pricing_success(self):
         self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
@@ -89,6 +104,89 @@ class PricingTestCase(unittest.TestCase):
         self.assertEqual(price1, 2)
         self.assertEqual(price2, 3)
 
+    def test_get_size_price_lazy_loads_requested_driver(self):
+        with patch("libcloud.pricing.get_pricing_file_path", return_value=PRICING_FILE_PATH):
+            with patch(
+                "libcloud.pricing.json.load",
+                side_effect=AssertionError("Should not fully load pricing data"),
+            ):
+                with patch("libcloud.pricing.open", wraps=open) as mock_open:
+                    price1 = libcloud.pricing.get_size_price("compute", "foo", "1")
+                    price2 = libcloud.pricing.get_size_price("compute", "foo", "2")
+
+        self.assertEqual(price1, 1.0)
+        self.assertEqual(price2, 2.0)
+        self.assertEqual(mock_open.call_count, 1)
+        self.assertEqual(set(libcloud.pricing.PRICING_DATA["compute"].keys()), {"foo"})
+        self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
+
+    def test_get_storage_price_lazy_loads_from_custom_file(self):
+        pricing_file_path = self._create_pricing_file(
+            {
+                "compute": {"foo": {"1": 1.0}},
+                "storage": {
+                    "custom-storage": {
+                        "standard": 10.5,
+                        "regional": {"us-east": 12.0},
+                    },
+                    "unused-storage": {"standard": 15.0},
+                },
+                "updated": 1309019791,
+            }
+        )
+
+        with patch("libcloud.pricing.CUSTOM_PRICING_FILE_PATH", pricing_file_path):
+            with patch(
+                "libcloud.pricing.json.load",
+                side_effect=AssertionError("Should not fully load pricing data"),
+            ):
+                price1 = libcloud.pricing.get_storage_price("custom-storage", "standard")
+                price2 = libcloud.pricing.get_storage_price(
+                    "custom-storage", "regional", region="us-east"
+                )
+
+        self.assertEqual(price1, 10.5)
+        self.assertEqual(price2, 12.0)
+        self.assertEqual(set(libcloud.pricing.PRICING_DATA["storage"].keys()), {"custom-storage"})
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+    def test_clear_pricing_cache_clears_loaded_pricing_data(self):
+        with patch("libcloud.pricing.get_pricing_file_path", return_value=PRICING_FILE_PATH):
+            with patch("libcloud.pricing.open", wraps=open) as mock_open:
+                first_price = libcloud.pricing.get_size_price("compute", "foo", "1")
+                libcloud.pricing.clear_pricing_cache()
+                self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+                second_price = libcloud.pricing.get_size_price("compute", "foo", "1")
+
+        self.assertEqual(first_price, 1.0)
+        self.assertEqual(second_price, 1.0)
+        self.assertEqual(mock_open.call_count, 2)
+
+    def test_get_pricing_uses_custom_file_cache(self):
+        pricing_file_path = self._create_pricing_file(
+            {
+                "compute": {"foo": {"1": 9.0}},
+                "storage": {},
+                "updated": 1309019791,
+            }
+        )
+
+        with patch("libcloud.pricing.open", wraps=open) as mock_open:
+            pricing1 = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=pricing_file_path,
+            )
+            pricing2 = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=pricing_file_path,
+            )
+
+        self.assertEqual(pricing1["1"], 9.0)
+        self.assertEqual(pricing2["1"], 9.0)
+        self.assertEqual(mock_open.call_count, 1)
+
     def test_invalid_pricing_cache(self):
         libcloud.pricing.PRICING_DATA["compute"]["foo"] = {2: 2}
         self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
@@ -112,7 +210,6 @@ class PricingTestCase(unittest.TestCase):
         self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
 
     def test_get_pricing_data_caching(self):
-        # Ensure we only cache pricing data in memory for requested drivers
         self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
         self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
 
@@ -140,7 +237,6 @@ class PricingTestCase(unittest.TestCase):
         self.assertTrue("baz" in libcloud.pricing.PRICING_DATA["compute"])
 
     def test_get_pricing_data_module_level_variable_is_true(self):
-        # Ensure we only cache pricing data in memory for requested drivers
         self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
         self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
 
@@ -161,7 +257,6 @@ class PricingTestCase(unittest.TestCase):
         self.assertTrue("baz" in libcloud.pricing.PRICING_DATA["compute"])
 
     def test_get_pricing_data_caching_cache_all(self):
-        # Ensure we only cache pricing data in memory for requested drivers
         self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
         self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
 

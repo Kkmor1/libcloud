@@ -16,6 +16,7 @@
 import ssl
 import time
 import socket
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from functools import wraps
@@ -26,9 +27,74 @@ from libcloud.common.exceptions import RateLimitReachedError
 __all__ = [
     "Retry",
     "RetryForeverOnRateLimitError",
+    "retry_on_exception",
 ]
 
 _logger = logging.getLogger(__name__)
+
+
+def retry_on_exception(exceptions=Exception, max_retries=3, delay=1, backoff=2):
+    """Decorator that retries a function on specified exceptions.
+
+    :param exceptions: Exception type or tuple of exception types to catch.
+    :param max_retries: Maximum number of retry attempts (not including the initial attempt).
+    :param delay: Initial delay between retries in seconds.
+    :param backoff: Multiplier applied to delay between retries.
+
+    Example:
+        @retry_on_exception(exceptions=(ValueError,), max_retries=3)
+        def my_function():
+            pass
+    """
+    if isinstance(exceptions, type):
+        exceptions = (exceptions,)
+
+    def decorator(func):
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            current_delay = delay
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    _logger.debug(
+                        "%s: retry %d/%d after exception: %s",
+                        func.__name__,
+                        attempt + 1,
+                        max_retries,
+                        e,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+            raise e
+
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            current_delay = delay
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    _logger.debug(
+                        "%s: retry %d/%d after exception: %s",
+                        func.__name__,
+                        attempt + 1,
+                        max_retries,
+                        e,
+                    )
+                    if attempt < max_retries:
+                        await asyncio.sleep(current_delay)
+                        current_delay *= backoff
+            raise e
+
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        return sync_wrapper
+
+    return decorator
+
+
 # Error message which indicates a transient SSL error upon which request
 # can be retried
 TRANSIENT_SSL_ERROR = "The read operation timed out"

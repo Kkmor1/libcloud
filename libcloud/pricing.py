@@ -41,6 +41,7 @@ __all__ = [
     "get_image_price",
     "set_pricing",
     "clear_pricing_data",
+    "clear_pricing_cache",
     "download_pricing_file",
 ]
 
@@ -116,23 +117,72 @@ def get_pricing(driver_type, driver_name, pricing_file_path=None, cache_all=Fals
     with open(pricing_file_path) as fp:
         content = fp.read()
 
-    pricing_data = json.loads(content)
-    driver_pricing = pricing_data[driver_type][driver_name]
-
-    # NOTE: We only cache prices in memory for the the requested drivers.
+    # NOTE: We only cache prices in memory for the requested drivers.
     # This way we avoid storing massive pricing data for all the drivers in
     # memory
 
     if cache_all:
-        for driver_type in VALID_PRICING_DRIVER_TYPES:
+        pricing_data = json.loads(content)
+        driver_pricing = pricing_data.get(driver_type, {}).get(driver_name)
+
+        for d_type in VALID_PRICING_DRIVER_TYPES:
             # pylint: disable=maybe-no-member
-            pricing = pricing_data.get(driver_type, None)
+            pricing = pricing_data.get(d_type, None)
 
             if not pricing:
                 continue
 
-            PRICING_DATA[driver_type] = pricing
+            PRICING_DATA[d_type] = pricing
     else:
+        # Lazy load the specific driver's pricing data
+        driver_pricing = None
+        type_match = re.search(r'"%s"\s*:\s*\{' % re.escape(driver_type), content)
+        if type_match:
+            idx = type_match.end()
+            
+            def skip_ws(s, i):
+                while i < len(s) and s[i].isspace():
+                    i += 1
+                return i
+                
+            idx = skip_ws(content, idx)
+            decoder = json.JSONDecoder()
+            
+            while idx < len(content) and content[idx] != '}':
+                try:
+                    key, end_idx = decoder.raw_decode(content, idx)
+                    if not isinstance(key, str):
+                        break
+                    idx = skip_ws(content, end_idx)
+                except Exception:
+                    break
+                    
+                if idx >= len(content) or content[idx] != ':':
+                    break
+                    
+                idx = skip_ws(content, idx + 1)
+                
+                if key == driver_name:
+                    if content[idx] == '{':
+                        try:
+                            driver_pricing, _ = decoder.raw_decode(content, idx)
+                        except Exception:
+                            pass
+                    break
+                else:
+                    try:
+                        _, end_idx = decoder.raw_decode(content, idx)
+                        idx = skip_ws(content, end_idx)
+                        if idx < len(content) and content[idx] == ',':
+                            idx = skip_ws(content, idx + 1)
+                    except Exception:
+                        break
+
+        if driver_pricing is None:
+            # Fallback to full load if lazy load fails or driver is missing
+            pricing_data = json.loads(content)
+            driver_pricing = pricing_data[driver_type][driver_name]
+
         set_pricing(driver_type=driver_type, driver_name=driver_name, pricing=driver_pricing)
 
     return driver_pricing
@@ -290,6 +340,14 @@ def invalidate_pricing_cache():
     """
     PRICING_DATA["compute"] = {}
     PRICING_DATA["storage"] = {}
+
+
+def clear_pricing_cache():
+    # type: () -> None
+    """
+    Clear the loaded pricing cache.
+    """
+    invalidate_pricing_cache()
 
 
 def clear_pricing_data():

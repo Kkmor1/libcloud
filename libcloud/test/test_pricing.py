@@ -96,6 +96,52 @@ class PricingTestCase(unittest.TestCase):
         libcloud.pricing.invalidate_pricing_cache()
         self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
 
+    def test_clear_pricing_cache(self):
+        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {2: 2}
+        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
+
+        libcloud.pricing.clear_pricing_cache()
+        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
+
+    def test_lazy_loading_behavior(self):
+        import json
+        
+        # Ensure cache is empty
+        libcloud.pricing.clear_pricing_cache()
+        
+        original_loads = libcloud.pricing.json.loads
+        loads_called = [False]
+        
+        def mock_loads(*args, **kwargs):
+            loads_called[0] = True
+            return original_loads(*args, **kwargs)
+            
+        libcloud.pricing.json.loads = mock_loads
+        
+        try:
+            pricing = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=PRICING_FILE_PATH,
+                cache_all=False,
+            )
+            self.assertEqual(pricing["1"], 1.0)
+            # Verify json.loads was NOT called because of lazy loading
+            self.assertFalse(loads_called[0])
+            
+            # Verify that falling back works if we pass cache_all=True
+            loads_called[0] = False
+            libcloud.pricing.clear_pricing_cache()
+            libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=PRICING_FILE_PATH,
+                cache_all=True,
+            )
+            self.assertTrue(loads_called[0])
+        finally:
+            libcloud.pricing.json.loads = original_loads
+
     def test_invalid_module_pricing_cache(self):
         libcloud.pricing.PRICING_DATA["compute"]["foo"] = {1: 1}
 

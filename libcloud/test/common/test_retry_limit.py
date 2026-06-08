@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import ssl
 import socket
+import asyncio
+import logging
 from unittest.mock import Mock, MagicMock, patch
 
 from libcloud.test import unittest
 from libcloud.common.base import Connection
-from libcloud.utils.retry import TRANSIENT_SSL_ERROR
+from libcloud.utils.retry import TRANSIENT_SSL_ERROR, retry_on_exception
 
 CONFLICT_RESPONSE_STATUS = [
     ("status", "429"),
@@ -55,6 +58,64 @@ class FailedRequestRetryTestCase(unittest.TestCase):
 
                 self.assertRaises(ssl.SSLError, conn.request, "/")
                 self.assertGreater(connection.request.call_count, 1)
+
+
+class RetryOnExceptionTestCase(unittest.TestCase):
+    def setUp(self):
+        self.logger = logging.getLogger("libcloud.utils.retry")
+        self.stream = io.StringIO()
+        self.handler = logging.StreamHandler(self.stream)
+        self.old_level = self.logger.level
+        self.logger.addHandler(self.handler)
+        self.logger.setLevel(logging.DEBUG)
+
+    def tearDown(self):
+        self.logger.removeHandler(self.handler)
+        self.logger.setLevel(self.old_level)
+
+    def test_retry_on_exception_sync_execution_count(self):
+        self.assertEqual(self._run_sync_retry(0), 1)
+        self.assertEqual(self._run_sync_retry(1), 1)
+        self.assertEqual(self._run_sync_retry(3), 3)
+
+    def test_retry_on_exception_async_execution_count(self):
+        self.assertEqual(self._run_async_retry(0), 1)
+        self.assertEqual(self._run_async_retry(1), 1)
+        self.assertEqual(self._run_async_retry(3), 3)
+
+    def test_retry_on_exception_logs_retry_details(self):
+        self._run_sync_retry(3)
+        log_output = self.stream.getvalue()
+
+        self.assertIn("Retrying sync_fail (1/3)", log_output)
+        self.assertIn("Retrying sync_fail (2/3)", log_output)
+        self.assertIn("ValueError('sync boom')", log_output)
+
+    def _run_sync_retry(self, max_retries):
+        counter = {"count": 0}
+
+        @retry_on_exception(exception_types=ValueError, max_retries=max_retries, retry_delay=0)
+        def sync_fail():
+            counter["count"] += 1
+            raise ValueError("sync boom")
+
+        with self.assertRaises(ValueError):
+            sync_fail()
+
+        return counter["count"]
+
+    def _run_async_retry(self, max_retries):
+        counter = {"count": 0}
+
+        @retry_on_exception(exception_types=ValueError, max_retries=max_retries, retry_delay=0)
+        async def async_fail():
+            counter["count"] += 1
+            raise ValueError("async boom")
+
+        with self.assertRaises(ValueError):
+            asyncio.run(async_fail())
+
+        return counter["count"]
 
 
 if __name__ == "__main__":

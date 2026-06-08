@@ -1,0 +1,200 @@
+diff --git a/libcloud/test/common/test_retry_limit.py b/libcloud/test/common/test_retry_limit.py
+index 935a8040f..a53e529a0 100644
+--- a/libcloud/test/common/test_retry_limit.py
++++ b/libcloud/test/common/test_retry_limit.py
+@@ -13,13 +13,16 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import io
+ import ssl
+ import socket
++import asyncio
++import logging
+ from unittest.mock import Mock, MagicMock, patch
+ 
+ from libcloud.test import unittest
+ from libcloud.common.base import Connection
+-from libcloud.utils.retry import TRANSIENT_SSL_ERROR
++from libcloud.utils.retry import TRANSIENT_SSL_ERROR, retry_on_exception
+ 
+ CONFLICT_RESPONSE_STATUS = [
+     ("status", "429"),
+@@ -57,5 +60,63 @@ class FailedRequestRetryTestCase(unittest.TestCase):
+                 self.assertGreater(connection.request.call_count, 1)
+ 
+ 
++class RetryOnExceptionTestCase(unittest.TestCase):
++    def setUp(self):
++        self.logger = logging.getLogger("libcloud.utils.retry")
++        self.stream = io.StringIO()
++        self.handler = logging.StreamHandler(self.stream)
++        self.old_level = self.logger.level
++        self.logger.addHandler(self.handler)
++        self.logger.setLevel(logging.DEBUG)
++
++    def tearDown(self):
++        self.logger.removeHandler(self.handler)
++        self.logger.setLevel(self.old_level)
++
++    def test_retry_on_exception_sync_execution_count(self):
++        self.assertEqual(self._run_sync_retry(0), 1)
++        self.assertEqual(self._run_sync_retry(1), 1)
++        self.assertEqual(self._run_sync_retry(3), 3)
++
++    def test_retry_on_exception_async_execution_count(self):
++        self.assertEqual(self._run_async_retry(0), 1)
++        self.assertEqual(self._run_async_retry(1), 1)
++        self.assertEqual(self._run_async_retry(3), 3)
++
++    def test_retry_on_exception_logs_retry_details(self):
++        self._run_sync_retry(3)
++        log_output = self.stream.getvalue()
++
++        self.assertIn("Retrying sync_fail (1/3)", log_output)
++        self.assertIn("Retrying sync_fail (2/3)", log_output)
++        self.assertIn("ValueError('sync boom')", log_output)
++
++    def _run_sync_retry(self, max_retries):
++        counter = {"count": 0}
++
++        @retry_on_exception(exception_types=ValueError, max_retries=max_retries, retry_delay=0)
++        def sync_fail():
++            counter["count"] += 1
++            raise ValueError("sync boom")
++
++        with self.assertRaises(ValueError):
++            sync_fail()
++
++        return counter["count"]
++
++    def _run_async_retry(self, max_retries):
++        counter = {"count": 0}
++
++        @retry_on_exception(exception_types=ValueError, max_retries=max_retries, retry_delay=0)
++        async def async_fail():
++            counter["count"] += 1
++            raise ValueError("async boom")
++
++        with self.assertRaises(ValueError):
++            asyncio.run(async_fail())
++
++        return counter["count"]
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/libcloud/utils/retry.py b/libcloud/utils/retry.py
+index fabb1133b..e8e7abc7d 100644
+--- a/libcloud/utils/retry.py
++++ b/libcloud/utils/retry.py
+@@ -16,6 +16,7 @@
+ import ssl
+ import time
+ import socket
++import asyncio
+ import logging
+ from datetime import datetime, timedelta
+ from functools import wraps
+@@ -26,6 +27,7 @@ from libcloud.common.exceptions import RateLimitReachedError
+ __all__ = [
+     "Retry",
+     "RetryForeverOnRateLimitError",
++    "retry_on_exception",
+ ]
+ 
+ _logger = logging.getLogger(__name__)
+@@ -34,6 +36,93 @@ _logger = logging.getLogger(__name__)
+ TRANSIENT_SSL_ERROR = "The read operation timed out"
+ 
+ 
++def _get_retry_exceptions(exception_types=None, retry_exceptions=None):
++    if retry_exceptions is not None:
++        exception_types = retry_exceptions
++
++    if exception_types is None:
++        return (Exception,)
++
++    if isinstance(exception_types, tuple):
++        return exception_types
++
++    return (exception_types,)
++
++
++def _log_retry(func_name, retry_count, max_retries, exc):
++    _logger.debug(
++        "Retrying %s (%d/%d) after exception: %r",
++        func_name,
++        retry_count,
++        max_retries,
++        exc,
++    )
++
++
++def retry_on_exception(
++    exception_types=None,
++    max_retries=3,
++    retry_delay=0,
++    backoff=1,
++    retry_exceptions=None,
++):
++    retry_exceptions = _get_retry_exceptions(
++        exception_types=exception_types, retry_exceptions=retry_exceptions
++    )
++    max_retries = 0 if max_retries is None else max_retries
++    retry_delay = 0 if retry_delay is None else retry_delay
++    backoff = 1 if backoff is None else backoff
++
++    def decorator(func):
++        if asyncio.iscoroutinefunction(func):
++
++            @wraps(func)
++            async def async_wrapper(*args, **kwargs):
++                current_delay = retry_delay
++                attempt = 0
++
++                while True:
++                    attempt += 1
++
++                    try:
++                        return await func(*args, **kwargs)
++                    except retry_exceptions as exc:
++                        if attempt >= max_retries:
++                            raise
++
++                        _log_retry(func.__name__, attempt, max_retries, exc)
++
++                        if current_delay > 0:
++                            await asyncio.sleep(current_delay)
++                            current_delay *= backoff
++
++            return async_wrapper
++
++        @wraps(func)
++        def wrapper(*args, **kwargs):
++            current_delay = retry_delay
++            attempt = 0
++
++            while True:
++                attempt += 1
++
++                try:
++                    return func(*args, **kwargs)
++                except retry_exceptions as exc:
++                    if attempt >= max_retries:
++                        raise
++
++                    _log_retry(func.__name__, attempt, max_retries, exc)
++
++                    if current_delay > 0:
++                        time.sleep(current_delay)
++                        current_delay *= backoff
++
++        return wrapper
++
++    return decorator
++
++
+ class TransientSSLError(ssl.SSLError):
+     """Represent transient SSL errors, e.g. timeouts"""
+ 

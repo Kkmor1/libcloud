@@ -57,16 +57,98 @@ CUSTOM_PRICING_FILE_PATH = os.path.expanduser("~/.libcloud/pricing.json")
 # Pricing data cache
 PRICING_DATA = {"compute": {}, "storage": {}}  # type: Dict[str, Dict]
 
-# Cache for parsed pricing files, keyed by file path.
-# This avoids re-reading and re-parsing the entire pricing.json file
-# every time pricing data for a new driver is requested.
-_PRICING_FILE_CACHE = {}  # type: Dict[str, dict]
+# Cache for pricing file raw content, keyed by file path.
+# Storing raw strings (~2 MB) instead of fully parsed dicts (~20+ MB)
+# avoids unnecessary memory overhead for users who only use a single driver.
+# The raw content is re-parsed as needed and only the requested driver's
+# pricing data is kept in PRICING_DATA.
+_PRICING_FILE_CACHE = {}  # type: Dict[str, str]
 
 VALID_PRICING_DRIVER_TYPES = ["compute", "storage"]
 
 # Set this to True to cache all the pricing data in memory instead of just the
 # one for the drivers which are used
 CACHE_ALL_PRICING_DATA = False
+
+
+def _find_json_section_end(content, start_pos):
+    # type: (str, int) -> int
+    in_string = False
+    escape_next = False
+    depth = 0
+    pos = start_pos
+
+    while pos < len(content):
+        ch = content[pos]
+
+        if escape_next:
+            escape_next = False
+            pos += 1
+            continue
+
+        if ch == "\\":
+            escape_next = True
+            pos += 1
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            pos += 1
+            continue
+
+        if in_string:
+            pos += 1
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return pos
+
+        pos += 1
+
+    raise ValueError("Unterminated JSON object")
+
+
+def _extract_driver_pricing(content, driver_type, driver_name):
+    # type: (str, str, str) -> dict
+    pos = 0
+
+    for key in (driver_type, driver_name):
+        escaped_key = json.dumps(key)
+        search_start = pos
+
+        while True:
+            idx = content.find(escaped_key, search_start)
+            if idx == -1:
+                raise KeyError(key)
+
+            before = content[:idx].rstrip()
+            if before.rstrip().endswith("{"):
+                after_start = idx + len(escaped_key)
+                break
+            else:
+                if before.rstrip().endswith(","):
+                    after_start = idx + len(escaped_key)
+                    break
+                search_start = idx + 1
+
+        pos = after_start
+        while pos < len(content) and content[pos] in " \t\n\r":
+            pos += 1
+        if pos < len(content) and content[pos] == ":":
+            pos += 1
+        while pos < len(content) and content[pos] in " \t\n\r":
+            pos += 1
+
+    if pos >= len(content) or content[pos] != "{":
+        raise ValueError("Expected JSON object at position %d, got %s" % (pos, content[pos] if pos < len(content) else "EOF"))
+
+    end_pos = _find_json_section_end(content, pos)
+    section = content[pos : end_pos + 1]
+    return json.loads(section)
 
 
 def get_pricing_file_path(file_path=None):
@@ -82,6 +164,11 @@ def get_pricing(driver_type, driver_name, pricing_file_path=None, cache_all=Fals
     # type: (str, str, Optional[str], bool) -> Optional[dict]
     """
     Return pricing for the provided driver.
+
+    Pricing data is loaded on demand - only the requested driver's data
+    is parsed from the pricing file. This avoids loading the entire
+    pricing.json (~2 MB raw, ~20 MB parsed) into memory when only a single
+    provider is needed.
 
     NOTE: This method will also cache data for the requested driver
     memory.
@@ -120,30 +207,31 @@ def get_pricing(driver_type, driver_name, pricing_file_path=None, cache_all=Fals
         pricing_file_path = get_pricing_file_path(file_path=pricing_file_path)
 
     if pricing_file_path in _PRICING_FILE_CACHE:
-        pricing_data = _PRICING_FILE_CACHE[pricing_file_path]
+        content = _PRICING_FILE_CACHE[pricing_file_path]
     else:
         with open(pricing_file_path) as fp:
             content = fp.read()
-
-        pricing_data = json.loads(content)
-        _PRICING_FILE_CACHE[pricing_file_path] = pricing_data
-
-    driver_pricing = pricing_data[driver_type][driver_name]
-
-    # NOTE: We only cache prices in memory for the the requested drivers.
-    # This way we avoid storing massive pricing data for all the drivers in
-    # memory
+        _PRICING_FILE_CACHE[pricing_file_path] = content
 
     if cache_all:
-        for driver_type in VALID_PRICING_DRIVER_TYPES:
-            # pylint: disable=maybe-no-member
-            pricing = pricing_data.get(driver_type, None)
+        pricing_data = json.loads(content)
+    else:
+        pricing_data = None
 
+    if cache_all:
+        driver_pricing = pricing_data[driver_type][driver_name]
+
+        for dt in VALID_PRICING_DRIVER_TYPES:
+            pricing = pricing_data.get(dt, None)
             if not pricing:
                 continue
-
-            PRICING_DATA[driver_type] = pricing
+            PRICING_DATA[dt] = pricing
     else:
+        driver_pricing = _extract_driver_pricing(
+            content=content,
+            driver_type=driver_type,
+            driver_name=driver_name,
+        )
         set_pricing(driver_type=driver_type, driver_name=driver_name, pricing=driver_pricing)
 
     return driver_pricing

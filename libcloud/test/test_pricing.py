@@ -136,10 +136,10 @@ class PricingTestCase(unittest.TestCase):
         )
 
         self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
-        self.assertEqual(
-            libcloud.pricing._PRICING_FILE_CACHE[PRICING_FILE_PATH]["compute"]["foo"]["1"],
-            1.0,
-        )
+        cached_content = libcloud.pricing._PRICING_FILE_CACHE[PRICING_FILE_PATH]
+        self.assertIsInstance(cached_content, str)
+        self.assertIn('"foo"', cached_content)
+        self.assertIn('"1"', cached_content)
 
     def test_pricing_file_cache_reused_for_subsequent_drivers(self):
         pricing = libcloud.pricing.get_pricing(
@@ -193,12 +193,10 @@ class PricingTestCase(unittest.TestCase):
 
             self.assertTrue(PRICING_FILE_PATH in libcloud.pricing._PRICING_FILE_CACHE)
             self.assertTrue(custom_path in libcloud.pricing._PRICING_FILE_CACHE)
-            self.assertEqual(
-                libcloud.pricing._PRICING_FILE_CACHE[custom_path]["compute"]["custom_driver"][
-                    "small"
-                ],
-                0.01,
-            )
+            cached_custom = libcloud.pricing._PRICING_FILE_CACHE[custom_path]
+            self.assertIsInstance(cached_custom, str)
+            self.assertIn("custom_driver", cached_custom)
+            self.assertIn("0.01", cached_custom)
         finally:
             os.remove(custom_path)
 
@@ -215,6 +213,177 @@ class PricingTestCase(unittest.TestCase):
             )
 
         self.assertEqual(price, 1.0)
+
+    def test_lazy_loading_only_caches_requested_driver(self):
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertNotIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertNotIn("baz", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertEqual(len(libcloud.pricing.PRICING_DATA["compute"]), 1)
+
+    def test_lazy_loading_multiple_drivers_cached_independently(self):
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="bar",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertNotIn("baz", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertEqual(len(libcloud.pricing.PRICING_DATA["compute"]), 2)
+
+    def test_lazy_loading_storage_driver_type(self):
+        storage_pricing_path = os.path.join(
+            os.path.dirname(__file__), "pricing_test_storage.json"
+        )
+        test_data = {
+            "storage": {"test_storage_driver": {"volume_1": 10.0, "volume_2": 25.0}},
+            "updated": 1,
+        }
+        import json
+
+        with open(storage_pricing_path, "w") as f:
+            json.dump(test_data, f)
+
+        try:
+            pricing = libcloud.pricing.get_pricing(
+                driver_type="storage",
+                driver_name="test_storage_driver",
+                pricing_file_path=storage_pricing_path,
+            )
+
+            self.assertEqual(pricing["volume_1"], 10.0)
+            self.assertEqual(pricing["volume_2"], 25.0)
+            self.assertIn(
+                "test_storage_driver", libcloud.pricing.PRICING_DATA["storage"]
+            )
+            self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+        finally:
+            os.remove(storage_pricing_path)
+
+    def test_lazy_loading_size_price_through_api(self):
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+        with mock.patch(
+            "libcloud.pricing.get_pricing_file_path", return_value=PRICING_FILE_PATH
+        ):
+            price = libcloud.pricing.get_size_price(
+                driver_type="compute",
+                driver_name="foo",
+                size_id="2",
+            )
+
+        self.assertEqual(price, 2.0)
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertNotIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+
+    def test_lazy_loading_custom_pricing_file(self):
+        custom_path = os.path.join(
+            os.path.dirname(__file__), "pricing_test_lazy_custom.json"
+        )
+        test_data = {
+            "compute": {
+                "driver_a": {"small": 5.0, "medium": 10.0},
+                "driver_b": {"tiny": 1.0, "huge": 100.0},
+            },
+            "updated": 1,
+        }
+        import json
+
+        with open(custom_path, "w") as f:
+            json.dump(test_data, f)
+
+        try:
+            libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="driver_a",
+                pricing_file_path=custom_path,
+            )
+
+            self.assertIn("driver_a", libcloud.pricing.PRICING_DATA["compute"])
+            self.assertNotIn("driver_b", libcloud.pricing.PRICING_DATA["compute"])
+
+            pricing_b = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="driver_b",
+                pricing_file_path=custom_path,
+            )
+            self.assertEqual(pricing_b["tiny"], 1.0)
+            self.assertIn("driver_b", libcloud.pricing.PRICING_DATA["compute"])
+        finally:
+            os.remove(custom_path)
+
+    def test_lazy_loading_clear_and_reload(self):
+        libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+
+        libcloud.pricing.clear_pricing_cache()
+
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+        self.assertEqual(libcloud.pricing._PRICING_FILE_CACHE, {})
+
+        pricing = libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+        )
+        self.assertEqual(pricing["1"], 1.0)
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertNotIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+
+    def test_lazy_loading_cache_all_still_works(self):
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+        pricing = libcloud.pricing.get_pricing(
+            driver_type="compute",
+            driver_name="foo",
+            pricing_file_path=PRICING_FILE_PATH,
+            cache_all=True,
+        )
+        self.assertEqual(pricing["1"], 1.0)
+
+        self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertIn("baz", libcloud.pricing.PRICING_DATA["compute"])
+        self.assertEqual(len(libcloud.pricing.PRICING_DATA["compute"]), 3)
+
+    def test_lazy_loading_module_level_cache_all(self):
+        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
+
+        libcloud.pricing.CACHE_ALL_PRICING_DATA = True
+
+        try:
+            pricing = libcloud.pricing.get_pricing(
+                driver_type="compute",
+                driver_name="foo",
+                pricing_file_path=PRICING_FILE_PATH,
+            )
+            self.assertEqual(pricing["1"], 1.0)
+
+            self.assertIn("foo", libcloud.pricing.PRICING_DATA["compute"])
+            self.assertIn("bar", libcloud.pricing.PRICING_DATA["compute"])
+            self.assertIn("baz", libcloud.pricing.PRICING_DATA["compute"])
+        finally:
+            libcloud.pricing.CACHE_ALL_PRICING_DATA = False
 
     def test_clear_pricing_cache_clears_file_cache(self):
         libcloud.pricing.get_pricing(

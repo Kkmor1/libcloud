@@ -1,0 +1,151 @@
+diff --git a/libcloud/pricing.py b/libcloud/pricing.py
+index abc464cc1..961f71732 100644
+--- a/libcloud/pricing.py
++++ b/libcloud/pricing.py
+@@ -41,6 +41,9 @@ __all__ = [
+     "get_image_price",
+     "set_pricing",
+     "clear_pricing_data",
++    "clear_pricing_cache",
++    "invalidate_pricing_cache",
++    "invalidate_module_pricing_cache",
+     "download_pricing_file",
+ ]
+ 
+@@ -303,6 +306,17 @@ def clear_pricing_data():
+     invalidate_pricing_cache()
+ 
+ 
++def clear_pricing_cache():
++    # type: () -> None
++    """
++    Invalidate pricing cache for all the drivers.
++
++    Note: This method does the same thing as invalidate_pricing_cache and
++    clear_pricing_data, and is here for backward compatibility reasons.
++    """
++    invalidate_pricing_cache()
++
++
+ def invalidate_module_pricing_cache(driver_type, driver_name):
+     # type: (str, str) -> None
+     """
+diff --git a/libcloud/test/test_pricing.py b/libcloud/test/test_pricing.py
+index 8981ab78c..c864bf3e0 100644
+--- a/libcloud/test/test_pricing.py
++++ b/libcloud/test/test_pricing.py
+@@ -214,13 +214,113 @@ class PricingTestCase(unittest.TestCase):
+         self.assertTrue(fetched_price == correct_price)
+ 
+     def test_get_gce_image_price_SQL_image(self):
+-        image_name = "sql-2012-standard-windows-2012-r2-dc-v20220513"
++        image_name = "sql-2012-standard-windows-2012-r2-dc-core-v20220513"
+         size_name = "g1 small"
+         prices = libcloud.pricing.get_pricing("compute", "gce_images")
+         correct_price = float(prices["SQL Server"]["standard"]["price"])
+         fetched_price = libcloud.pricing.get_image_price("gce_images", image_name, size_name)
+         self.assertTrue(fetched_price == correct_price)
+ 
++    def test_clear_pricing_cache(self):
++        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {1: 1}
++        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
++
++        libcloud.pricing.clear_pricing_cache()
++        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
++
++    def test_clear_pricing_cache_alias_consistency(self):
++        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {1: 1}
++        libcloud.pricing.PRICING_DATA["compute"]["bar"] = {2: 2}
++
++        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertTrue("bar" in libcloud.pricing.PRICING_DATA["compute"])
++
++        # Test all three methods do the same thing
++        libcloud.pricing.clear_pricing_cache()
++        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertFalse("bar" in libcloud.pricing.PRICING_DATA["compute"])
++
++        # Re-populate and test invalidate_pricing_cache
++        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {1: 1}
++        libcloud.pricing.invalidate_pricing_cache()
++        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
++
++        # Re-populate and test clear_pricing_data
++        libcloud.pricing.PRICING_DATA["compute"]["foo"] = {1: 1}
++        libcloud.pricing.clear_pricing_data()
++        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
++
++    def test_lazy_loading_behavior(self):
++        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
++        self.assertEqual(libcloud.pricing.PRICING_DATA["storage"], {})
++
++        # First call to get_size_price should load only the needed driver
++        price = libcloud.pricing.get_size_price(
++            driver_type="compute",
++            driver_name="foo",
++            size_id="1",
++            pricing_file_path=PRICING_FILE_PATH,
++        )
++        self.assertEqual(price, 1.0)
++
++        # Only foo driver should be in cache
++        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertFalse("bar" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertFalse("baz" in libcloud.pricing.PRICING_DATA["compute"])
++
++        # Second call to another driver should load only that driver
++        price = libcloud.pricing.get_size_price(
++            driver_type="compute",
++            driver_name="bar",
++            size_id="1",
++            pricing_file_path=PRICING_FILE_PATH,
++        )
++        self.assertEqual(price, 3.0)
++
++        # Now both foo and bar should be in cache
++        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertTrue("bar" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertFalse("baz" in libcloud.pricing.PRICING_DATA["compute"])
++
++    def test_custom_pricing_file_lazy_loading(self):
++        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"], {})
++
++        # Use custom test file
++        price = libcloud.pricing.get_size_price(
++            driver_type="compute",
++            driver_name="baz",
++            size_id="2",
++            pricing_file_path=PRICING_FILE_PATH,
++        )
++        self.assertEqual(price, 6.0)
++
++        self.assertTrue("baz" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertEqual(libcloud.pricing.PRICING_DATA["compute"]["baz"]["2"], 6.0)
++
++    def test_invalidate_module_pricing_cache(self):
++        # Load multiple drivers
++        libcloud.pricing.get_pricing(
++            driver_type="compute",
++            driver_name="foo",
++            pricing_file_path=PRICING_FILE_PATH,
++        )
++        libcloud.pricing.get_pricing(
++            driver_type="compute",
++            driver_name="bar",
++            pricing_file_path=PRICING_FILE_PATH,
++        )
++
++        self.assertTrue("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertTrue("bar" in libcloud.pricing.PRICING_DATA["compute"])
++
++        # Invalidate only one driver
++        libcloud.pricing.invalidate_module_pricing_cache(
++            driver_type="compute", driver_name="foo"
++        )
++
++        self.assertFalse("foo" in libcloud.pricing.PRICING_DATA["compute"])
++        self.assertTrue("bar" in libcloud.pricing.PRICING_DATA["compute"])
++
+ 
+ if __name__ == "__main__":
+     sys.exit(unittest.main())

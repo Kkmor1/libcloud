@@ -41,6 +41,9 @@ __all__ = [
     "get_image_price",
     "set_pricing",
     "clear_pricing_data",
+    "clear_pricing_cache",
+    "invalidate_pricing_cache",
+    "invalidate_module_pricing_cache",
     "download_pricing_file",
 ]
 
@@ -299,6 +302,17 @@ def clear_pricing_data():
 
     Note: This method does the same thing as invalidate_pricing_cache and is
     here for backward compatibility reasons.
+    """
+    invalidate_pricing_cache()
+
+
+def clear_pricing_cache():
+    # type: () -> None
+    """
+    Invalidate pricing cache for all the drivers.
+
+    Note: This method does the same thing as invalidate_pricing_cache and
+    clear_pricing_data, and is here for backward compatibility reasons.
     """
     invalidate_pricing_cache()
 

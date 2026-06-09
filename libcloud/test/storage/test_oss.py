@@ -747,6 +747,157 @@ class OSSStorageDriverTestCase(unittest.TestCase):
         result = self.driver.delete_object(obj=obj)
         self.assertTrue(result)
 
+    def test_upload_object_with_progress_callback(self):
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            if progress_callback is not None:
+                progress_callback(1000, 1000)
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+
+        progress_calls = []
+
+        def callback(current, total):
+            progress_calls.append((current, total))
+
+        obj = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name=object_name,
+            verify_hash=True,
+            progress_callback=callback,
+        )
+        self.assertEqual(obj.name, "foo_test_upload")
+        self.assertEqual(obj.size, 1000)
+        self.assertTrue(len(progress_calls) > 0)
+        self.assertEqual(progress_calls[-1], (1000, 1000))
+        self.driver_type._upload_object = old_func
+
+    def test_upload_object_without_progress_callback(self):
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+
+        obj = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name=object_name,
+            verify_hash=True,
+        )
+        self.assertEqual(obj.name, "foo_test_upload")
+        self.assertEqual(obj.size, 1000)
+        self.driver_type._upload_object = old_func
+
+    def test_upload_object_via_stream_with_progress_callback(self):
+        if self.driver.supports_multipart_upload:
+            self.mock_response_klass.type = "multipart"
+        else:
+            self.mock_response_klass.type = None
+
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_stream_data"
+        iterator = DummyIterator(data=["2", "3", "5"])
+        extra = {"content_type": "text/plain"}
+
+        progress_calls = []
+
+        def callback(current, total):
+            progress_calls.append((current, total))
+
+        obj = self.driver.upload_object_via_stream(
+            container=container,
+            object_name=object_name,
+            iterator=iterator,
+            extra=extra,
+            progress_callback=callback,
+        )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, 3)
+        self.assertTrue(len(progress_calls) > 0)
+        last_current, last_total = progress_calls[-1]
+        self.assertEqual(last_current, 3)
+        self.assertIsNone(last_total)
+
+    def test_upload_big_object_via_stream_with_progress_callback(self):
+        if self.driver.supports_multipart_upload:
+            self.mock_response_klass.type = "multipart"
+        else:
+            self.mock_response_klass.type = None
+
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_stream_data"
+        iterator = DummyIterator(data=["2" * CHUNK_SIZE, "3" * CHUNK_SIZE, "5"])
+        extra = {"content_type": "text/plain"}
+
+        progress_calls = []
+
+        def callback(current, total):
+            progress_calls.append((current, total))
+
+        obj = self.driver.upload_object_via_stream(
+            container=container,
+            object_name=object_name,
+            iterator=iterator,
+            extra=extra,
+            progress_callback=callback,
+        )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, CHUNK_SIZE * 2 + 1)
+        if self.driver.supports_multipart_upload:
+            self.assertTrue(len(progress_calls) > 0)
+            last_current, last_total = progress_calls[-1]
+            self.assertEqual(last_current, CHUNK_SIZE * 2 + 1)
+            self.assertIsNone(last_total)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

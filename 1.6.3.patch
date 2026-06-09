@@ -1,0 +1,27 @@
+diff --git a/libcloud/backup/providers.py b/libcloud/backup/providers.py
+index 8a56f0112..4f45bece3 100644
+--- a/libcloud/backup/providers.py
++++ b/libcloud/backup/providers.py
+@@ -18,6 +18,10 @@ from libcloud.common.providers import get_driver as _get_provider_driver
+ from libcloud.common.providers import set_driver as _set_provider_driver
+ 
+ DRIVERS = {
++    Provider.ALIYUN_HBR: (
++        "libcloud.backup.drivers.aliyun",
++        "HBRBackupDriver",
++    ),
+     Provider.DUMMY: ("libcloud.backup.drivers.dummy", "DummyBackupDriver"),
+     Provider.EBS: ("libcloud.backup.drivers.ebs", "EBSBackupDriver"),
+     Provider.GCE: ("libcloud.backup.drivers.gce", "GCEBackupDriver"),
+diff --git a/libcloud/backup/types.py b/libcloud/backup/types.py
+index 912f90b52..2fc1fa475 100644
+--- a/libcloud/backup/types.py
++++ b/libcloud/backup/types.py
+@@ -24,6 +24,7 @@ class Provider:
+     ordering when adding new drivers.
+     """
+ 
++    ALIYUN_HBR = "aliyun_hbr"
+     DUMMY = "dummy"
+     DIMENSIONDATA = "dimensiondata"
+     EBS = "ebs"

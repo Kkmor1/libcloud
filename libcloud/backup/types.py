@@ -24,6 +24,7 @@ class Provider:
     ordering when adding new drivers.
     """
 
+    ALIYUN_HBR = "aliyun_hbr"
     DUMMY = "dummy"
     DIMENSIONDATA = "dimensiondata"
     EBS = "ebs"

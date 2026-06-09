@@ -39,6 +39,7 @@ jobs:
           - "3.14"
           # cryptography is not compatible with older PyPy versions
           - "pypy-3.10"
+          - "pypy-3.14"
         os:
           - ubuntu-latest
 
@@ -65,16 +66,19 @@ jobs:
             ${{ runner.os }}-uv-
 
       - name: Install Python Dependencies
-        run: uv sync --group ci --no-dev
+        run: uv sync --group ci --group test --no-dev
 
       - name: Add .venv to PATH
         run: echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run dependency compatibility checks
+        run: python -m pip check
 
       - name: Run unit tests tox target
         run: tox -e py${{ matrix.python_version }}
 
       - name: Run dist install checks tox target
-        if: ${{ matrix.python_version != 'pypy-3.10' }}
+        if: ${{ !startsWith(matrix.python_version, 'pypy-') }}
         run: tox -e py${{ matrix.python_version }}-dist,py${{ matrix.python_version }}-dist-wheel
 
   code_coverage:

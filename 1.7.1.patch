@@ -1,0 +1,215 @@
+diff --git a/.github/workflows/main.yml b/.github/workflows/main.yml
+index 540991747..9697599e6 100644
+--- a/.github/workflows/main.yml
++++ b/.github/workflows/main.yml
+@@ -39,6 +39,7 @@ jobs:
+           - "3.14"
+           # cryptography is not compatible with older PyPy versions
+           - "pypy-3.10"
++          - "pypy-3.14"
+         os:
+           - ubuntu-latest
+ 
+@@ -65,16 +66,19 @@ jobs:
+             ${{ runner.os }}-uv-
+ 
+       - name: Install Python Dependencies
+-        run: uv sync --group ci --no-dev
++        run: uv sync --group ci --group test --no-dev
+ 
+       - name: Add .venv to PATH
+         run: echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+ 
++      - name: Run dependency compatibility checks
++        run: python -m pip check
++
+       - name: Run unit tests tox target
+         run: tox -e py${{ matrix.python_version }}
+ 
+       - name: Run dist install checks tox target
+-        if: ${{ matrix.python_version != 'pypy-3.10' }}
++        if: ${{ !startsWith(matrix.python_version, 'pypy-') }}
+         run: tox -e py${{ matrix.python_version }}-dist,py${{ matrix.python_version }}-dist-wheel
+ 
+   code_coverage:
+diff --git a/libcloud/compute/drivers/equinixmetal.py b/libcloud/compute/drivers/equinixmetal.py
+index 2508e5fa6..3256e3022 100644
+--- a/libcloud/compute/drivers/equinixmetal.py
++++ b/libcloud/compute/drivers/equinixmetal.py
+@@ -197,40 +197,24 @@ class EquinixMetalNodeDriver(NodeDriver):
+         return self.list_resources_async("nodes")
+ 
+     def list_resources_async(self, resource_type):
+-        # The _list_nodes function is defined dynamically using exec in
+-        # order to prevent a SyntaxError in Python2 due to "yield from".
+-        # This cruft can be removed once Python2 support is no longer
+-        # required.
+         assert resource_type in ["nodes"]
+-        glob = globals()
+-        loc = locals()
+-        exec(
+-            """
+-import asyncio
+-@asyncio.coroutine
+-def _list_async(driver):
+-    projects = [project.id for project in driver.projects]
+-    loop = asyncio.get_event_loop()
+-    futures = [
+-        loop.run_in_executor(None, driver.ex_list_%s_for_project, p)
+-        for p in projects
+-    ]
+-    retval = []
+-    for future in futures:
+-        result = yield from future
+-        retval.extend(result)
+-
+-    return retval""" % resource_type,
+-            glob,
+-            loc,
+-        )
+-        try:
+-            loop = asyncio.get_event_loop()
+-        except RuntimeError:
+-            asyncio.set_event_loop(asyncio.new_event_loop())
+-            loop = asyncio.get_event_loop()
+ 
+-        return loop.run_until_complete(loc["_list_async"](loc["self"]))
++        async def _list_async(driver):
++            projects = [project.id for project in driver.projects]
++            loop = asyncio.get_running_loop()
++            futures = [
++                loop.run_in_executor(None, driver.ex_list_nodes_for_project, project_id)
++                for project_id in projects
++            ]
++            retval = []
++
++            for future in futures:
++                result = await future
++                retval.extend(result)
++
++            return retval
++
++        return asyncio.run(_list_async(self))
+ 
+     def ex_list_nodes_for_project(self, ex_project_id, include="plan", page=1, per_page=1000):
+         params = {"include": include, "page": page, "per_page": per_page}
+diff --git a/libcloud/compute/drivers/vsphere.py b/libcloud/compute/drivers/vsphere.py
+index 185cc6db7..f32472790 100644
+--- a/libcloud/compute/drivers/vsphere.py
++++ b/libcloud/compute/drivers/vsphere.py
+@@ -517,7 +517,7 @@ class VSphereNodeDriver(NodeDriver):
+             if vm.get("config.template"):
+                 continue  # Do not include templates in node list
+             vms.append(vm)
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         vms = [loop.run_in_executor(None, self._to_node, vms[i]) for i in range(len(vms))]
+ 
+         return await asyncio.gather(*vms)
+@@ -1416,7 +1416,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
+         return loop.run_until_complete(self._list_nodes_async(vm_ids, interfaces))
+ 
+     async def _list_nodes_async(self, vm_ids, interfaces):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         vms = [
+             loop.run_in_executor(None, self._to_node, vm_ids[i], interfaces)
+             for i in range(len(vm_ids))
+@@ -1433,7 +1433,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
+         host don't exceed 1000.
+         """
+         datacenters = self.ex_list_datacenters()
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         hosts_futures = [
+             loop.run_in_executor(
+                 None,
+diff --git a/pyproject.toml b/pyproject.toml
+index b8ea1260e..7c6922687 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -46,6 +46,7 @@ classifiers = [
+     "Programming Language :: Python :: 3.11",
+     "Programming Language :: Python :: 3.12",
+     "Programming Language :: Python :: 3.13",
++    "Programming Language :: Python :: 3.14",
+     "Programming Language :: Python :: Implementation :: CPython",
+     "Programming Language :: Python :: Implementation :: PyPy",
+     "Topic :: Software Development :: Libraries :: Python Modules",
+@@ -90,7 +91,7 @@ test = [
+     "pyopenssl==26.0.0",
+     "fasteners",
+     "paramiko==3.5.1; platform_python_implementation != 'PyPy'",
+-    "libvirt-python==12.0.0",
++    "libvirt-python==12.0.0; platform_python_implementation != 'PyPy'",
+ ]
+ lint = [
+     "pep8==1.7.1",
+@@ -175,7 +176,7 @@ readme = {file = ["README.rst"], content-type = "text/x-rst"}
+ 
+ [tool.black]
+ line_length = 100
+-target_version = ['py310', 'py311', 'py312', 'py313']
++target_version = ['py310', 'py311', 'py312', 'py313', 'py314']
+ include = '\.pyi?$'
+ exclude = '''
+ (
+diff --git a/tox.ini b/tox.ini
+index a48bd1158..4ac587912 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -1,5 +1,5 @@
+ [tox]
+-envlist = py{pypy3,3.10,3.11,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
++envlist = pypypy3,pypypy-3.14,py3.10,py3.11,py3.12,py3.13,py3.14,pyjion,checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
+ skipsdist = true
+ requires =
+     wheel
+@@ -22,15 +22,15 @@ allowlist_externals =
+     scripts/*.sh
+ basepython =
+     pypypy3: pypy3
+-    pypypy3.10: pypy3.10
+-    pypypy-3.10: pypy3.10
++    {pypypy3.10,pypypy-3.10}: pypy3.10
++    {pypypy3.14,pypypy-3.14}: pypy3.14
+     pypyjion: pyjion
+     {docs,checks,black,black-check,bandit,lint,pylint,mypy,micro-benchmarks,coverage,import-timings,isort,isort-check,pyupgrade,integration-storage}: python3.10
+     {py3.10,py3.10-dist,py3.10-dist-wheel}: python3.10
+     {py3.11,py3.11-dist,py3.11-dist-wheel}: python3.11
+     {py3.12,py3.12-dist,py3.12-dist-wheel}: python3.12
+-    {py3.13-dev,py3.13-dev-dist,py3.13-dev-dist-wheel}: python3.13
+-    {py3.14-dev,py3.14-dev-dist,py3.14-dev-dist-wheel}: python3.14
++    {py3.13,py3.13-dist,py3.13-dist-wheel}: python3.13
++    {py3.14,py3.14-dist,py3.14-dist-wheel}: python3.14
+ setenv =
+   CRYPTOGRAPHY_ALLOW_OPENSSL_102=1
+ # NOTE: By default we run tests on CI in parallel to speed up the build
+@@ -127,6 +127,27 @@ dependency_groups =
+ deps =
+ commands = bash -c "./scripts/dist_wheel_install_check.sh"
+ 
++[testenv:py3.14-dist]
++# Verify library installs without any dependencies when using python setup.py
++# install
++skipdist = True
++recreate = True
++# NOTE: We intentionally set empty deps to ensure it works on a clean
++# environment without any dependencies
++dependency_groups =
++deps =
++commands = bash -c "./scripts/dist_install_check.sh"
++
++[testenv:py3.14-dist-wheel]
++# Verify library installs without any dependencies when using built wheel
++skipdist = True
++recreate = True
++# NOTE: We intentionally set empty deps to ensure it works on a clean
++# environment without any dependencies
++dependency_groups =
++deps =
++commands = bash -c "./scripts/dist_wheel_install_check.sh"
++
+ [testenv:docs]
+ dependency_groups =
+     docs

@@ -197,40 +197,24 @@ class EquinixMetalNodeDriver(NodeDriver):
         return self.list_resources_async("nodes")
 
     def list_resources_async(self, resource_type):
-        # The _list_nodes function is defined dynamically using exec in
-        # order to prevent a SyntaxError in Python2 due to "yield from".
-        # This cruft can be removed once Python2 support is no longer
-        # required.
         assert resource_type in ["nodes"]
-        glob = globals()
-        loc = locals()
-        exec(
-            """
-import asyncio
-@asyncio.coroutine
-def _list_async(driver):
-    projects = [project.id for project in driver.projects]
-    loop = asyncio.get_event_loop()
-    futures = [
-        loop.run_in_executor(None, driver.ex_list_%s_for_project, p)
-        for p in projects
-    ]
-    retval = []
-    for future in futures:
-        result = yield from future
-        retval.extend(result)
 
-    return retval""" % resource_type,
-            glob,
-            loc,
-        )
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            loop = asyncio.get_event_loop()
+        async def _list_async(driver):
+            projects = [project.id for project in driver.projects]
+            loop = asyncio.get_running_loop()
+            futures = [
+                loop.run_in_executor(None, driver.ex_list_nodes_for_project, project_id)
+                for project_id in projects
+            ]
+            retval = []
 
-        return loop.run_until_complete(loc["_list_async"](loc["self"]))
+            for future in futures:
+                result = await future
+                retval.extend(result)
+
+            return retval
+
+        return asyncio.run(_list_async(self))
 
     def ex_list_nodes_for_project(self, ex_project_id, include="plan", page=1, per_page=1000):
         params = {"include": include, "page": page, "per_page": per_page}

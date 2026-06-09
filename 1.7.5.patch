@@ -1,0 +1,304 @@
+diff --git a/.github/workflows/main.yml b/.github/workflows/main.yml
+index 540991747..c41f0661a 100644
+--- a/.github/workflows/main.yml
++++ b/.github/workflows/main.yml
+@@ -39,6 +39,7 @@ jobs:
+           - "3.14"
+           # cryptography is not compatible with older PyPy versions
+           - "pypy-3.10"
++          - "pypy-3.14"
+         os:
+           - ubuntu-latest
+ 
+@@ -67,6 +68,14 @@ jobs:
+       - name: Install Python Dependencies
+         run: uv sync --group ci --no-dev
+ 
++      - name: Verify Dependency Compatibility
++        run: |
++          echo "Checking dependency compatibility for Python ${{ matrix.python_version }}"
++          uv pip list --format=columns
++          uv pip check || echo "Warning: Some dependencies may have compatibility issues"
++          python -c "import sys; print(f'Python version: {sys.version}')"
++          python -c "import libcloud; print(f'Libcloud version: {libcloud.__version__}')"
++
+       - name: Add .venv to PATH
+         run: echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+ 
+@@ -74,7 +83,7 @@ jobs:
+         run: tox -e py${{ matrix.python_version }}
+ 
+       - name: Run dist install checks tox target
+-        if: ${{ matrix.python_version != 'pypy-3.10' }}
++        if: ${{ matrix.python_version != 'pypy-3.10' && matrix.python_version != 'pypy-3.14' }}
+         run: tox -e py${{ matrix.python_version }}-dist,py${{ matrix.python_version }}-dist-wheel
+ 
+   code_coverage:
+diff --git a/libcloud/common/aws.py b/libcloud/common/aws.py
+index b575b66cc..b6d2d8ae4 100644
+--- a/libcloud/common/aws.py
++++ b/libcloud/common/aws.py
+@@ -272,7 +272,7 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
+         return params
+ 
+     def get_request_headers(self, params, headers, method="GET", path="/", data=None):
+-        now = datetime.utcnow()
++        now = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         headers["X-AMZ-Date"] = now.strftime("%Y%m%dT%H%M%SZ")
+         headers["X-AMZ-Content-SHA256"] = self._get_payload_hash(method, data)
+         headers["Authorization"] = self._get_authorization_v4_header(
+diff --git a/libcloud/common/google.py b/libcloud/common/google.py
+index eab0fb3af..64610d2fe 100644
+--- a/libcloud/common/google.py
++++ b/libcloud/common/google.py
+@@ -106,7 +106,7 @@ def _utcnow():
+     """
+     Mocked in libcloud.test.common.google.GoogleTestCase.
+     """
+-    return datetime.datetime.utcnow()
++    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+ 
+ def _utc_timestamp(datetime_obj):
+diff --git a/libcloud/common/openstack_identity.py b/libcloud/common/openstack_identity.py
+index 51953b166..690194e3a 100644
+--- a/libcloud/common/openstack_identity.py
++++ b/libcloud/common/openstack_identity.py
+@@ -791,7 +791,7 @@ class OpenStackIdentityConnection(ConnectionUserAndKey):
+         )
+ 
+         time_tuple_expires = expires.utctimetuple()
+-        time_tuple_now = datetime.datetime.utcnow().utctimetuple()
++        time_tuple_now = datetime.datetime.now(datetime.timezone.utc).utctimetuple()
+ 
+         if time_tuple_now < time_tuple_expires:
+             return True
+diff --git a/libcloud/common/osc.py b/libcloud/common/osc.py
+index 7dcdf32f6..692073d19 100644
+--- a/libcloud/common/osc.py
++++ b/libcloud/common/osc.py
+@@ -75,7 +75,7 @@ class OSCRequestSignerAlgorithmV4(OSCRequestSigner):
+         )
+ 
+     def get_request_headers(self, service_name: str, region: str, action: str, data: str):
+-        date = datetime.utcnow()
++        date = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         host = "{}.{}.outscale.com".format(service_name, region)
+         headers = {
+             "Content-Type": "application/json; charset=utf-8",
+diff --git a/libcloud/compute/drivers/equinixmetal.py b/libcloud/compute/drivers/equinixmetal.py
+index 2508e5fa6..8393cca98 100644
+--- a/libcloud/compute/drivers/equinixmetal.py
++++ b/libcloud/compute/drivers/equinixmetal.py
+@@ -210,7 +210,7 @@ import asyncio
+ @asyncio.coroutine
+ def _list_async(driver):
+     projects = [project.id for project in driver.projects]
+-    loop = asyncio.get_event_loop()
++    loop = asyncio.get_running_loop()
+     futures = [
+         loop.run_in_executor(None, driver.ex_list_%s_for_project, p)
+         for p in projects
+@@ -224,11 +224,8 @@ def _list_async(driver):
+             glob,
+             loc,
+         )
+-        try:
+-            loop = asyncio.get_event_loop()
+-        except RuntimeError:
+-            asyncio.set_event_loop(asyncio.new_event_loop())
+-            loop = asyncio.get_event_loop()
++        loop = asyncio.new_event_loop()
++        asyncio.set_event_loop(loop)
+ 
+         return loop.run_until_complete(loc["_list_async"](loc["self"]))
+ 
+diff --git a/libcloud/compute/drivers/gce.py b/libcloud/compute/drivers/gce.py
+index bdb46dbdc..35a4c4c0e 100644
+--- a/libcloud/compute/drivers/gce.py
++++ b/libcloud/compute/drivers/gce.py
+@@ -1892,7 +1892,7 @@ class GCEZone(NodeLocation):
+         Can be overridden in unittests.
+         """
+ 
+-        return datetime.datetime.utcnow()
++        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+     def _get_next_maint(self):
+         """
+diff --git a/libcloud/compute/drivers/vsphere.py b/libcloud/compute/drivers/vsphere.py
+index 185cc6db7..f32472790 100644
+--- a/libcloud/compute/drivers/vsphere.py
++++ b/libcloud/compute/drivers/vsphere.py
+@@ -517,7 +517,7 @@ class VSphereNodeDriver(NodeDriver):
+             if vm.get("config.template"):
+                 continue  # Do not include templates in node list
+             vms.append(vm)
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         vms = [loop.run_in_executor(None, self._to_node, vms[i]) for i in range(len(vms))]
+ 
+         return await asyncio.gather(*vms)
+@@ -1416,7 +1416,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
+         return loop.run_until_complete(self._list_nodes_async(vm_ids, interfaces))
+ 
+     async def _list_nodes_async(self, vm_ids, interfaces):
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         vms = [
+             loop.run_in_executor(None, self._to_node, vm_ids[i], interfaces)
+             for i in range(len(vm_ids))
+@@ -1433,7 +1433,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
+         host don't exceed 1000.
+         """
+         datacenters = self.ex_list_datacenters()
+-        loop = asyncio.get_event_loop()
++        loop = asyncio.get_running_loop()
+         hosts_futures = [
+             loop.run_in_executor(
+                 None,
+diff --git a/libcloud/dns/base.py b/libcloud/dns/base.py
+index f87844744..76d7ac9f1 100644
+--- a/libcloud/dns/base.py
++++ b/libcloud/dns/base.py
+@@ -480,7 +480,7 @@ class DNSDriver(BaseDriver):
+         records = zone.list_records()
+         records = sorted(records, key=Record._get_numeric_id)
+ 
+-        date = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
++        date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+         values = {"version": __version__, "date": date}
+ 
+         lines.append("; Generated by Libcloud v%(version)s on %(date)s UTC" % values)
+diff --git a/libcloud/dns/drivers/auroradns.py b/libcloud/dns/drivers/auroradns.py
+index 0cd40239b..97764212a 100644
+--- a/libcloud/dns/drivers/auroradns.py
++++ b/libcloud/dns/drivers/auroradns.py
+@@ -257,7 +257,7 @@ class AuroraDNSConnection(ConnectionUserAndKey):
+         if method in ("POST", "PUT"):
+             headers = {"Content-Type": "application/json; charset=UTF-8"}
+ 
+-        t = datetime.datetime.utcnow()
++        t = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         timestamp = t.strftime("%Y%m%dT%H%M%SZ")
+ 
+         headers["X-AuroraDNS-Date"] = timestamp
+diff --git a/libcloud/dns/drivers/route53.py b/libcloud/dns/drivers/route53.py
+index 6140cc6cb..bca9c53db 100644
+--- a/libcloud/dns/drivers/route53.py
++++ b/libcloud/dns/drivers/route53.py
+@@ -60,7 +60,7 @@ class BaseRoute53Connection(ConnectionUserAndKey):
+     responseCls = Route53DNSResponse
+ 
+     def pre_connect_hook(self, params, headers):
+-        time_string = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
++        time_string = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+         headers["Date"] = time_string
+         tmp = []
+ 
+diff --git a/libcloud/storage/drivers/azure_blobs.py b/libcloud/storage/drivers/azure_blobs.py
+index adaf3d81f..288590712 100644
+--- a/libcloud/storage/drivers/azure_blobs.py
++++ b/libcloud/storage/drivers/azure_blobs.py
+@@ -629,7 +629,7 @@ class AzureBlobsStorageDriver(StorageDriver):
+         """
+         object_path = self._get_object_path(obj.container, obj.name)
+ 
+-        now = datetime.utcnow()
++        now = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         start = now - timedelta(minutes=AZURE_STORAGE_CDN_URL_START_MINUTES)
+         expiry = now + timedelta(hours=ex_expiry)
+ 
+diff --git a/libcloud/storage/drivers/s3.py b/libcloud/storage/drivers/s3.py
+index bd9212ea5..62d0ef72e 100644
+--- a/libcloud/storage/drivers/s3.py
++++ b/libcloud/storage/drivers/s3.py
+@@ -1306,7 +1306,7 @@ class S3StorageDriver(AWSDriver, BaseS3StorageDriver):
+         # assemble data for the request we want to pre-sign
+         # see: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html # noqa
+         object_path = self._get_object_path(obj.container, obj.name)
+-        now = datetime.utcnow()
++        now = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         duration_seconds = int(ex_expiry * 3600)
+         credparts = (
+             self.key,
+diff --git a/libcloud/test/common/test_openstack_identity.py b/libcloud/test/common/test_openstack_identity.py
+index 9e74970c9..1d413ef20 100644
+--- a/libcloud/test/common/test_openstack_identity.py
++++ b/libcloud/test/common/test_openstack_identity.py
+@@ -259,7 +259,7 @@ class OpenStackIdentityConnectionTestCase(unittest.TestCase):
+ 
+         # No force reauth, valid / non-expired token which is about to expire in
+         # less than AUTH_TOKEN_EXPIRES_GRACE_SECONDS
+-        soon = datetime.datetime.utcnow() + datetime.timedelta(
++        soon = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(
+             seconds=AUTH_TOKEN_EXPIRES_GRACE_SECONDS - 1
+         )
+         osa.auth_token = None
+diff --git a/libcloud/test/common/test_osc.py b/libcloud/test/common/test_osc.py
+index 351c340fa..ed8a8f6e1 100644
+--- a/libcloud/test/common/test_osc.py
++++ b/libcloud/test/common/test_osc.py
+@@ -56,7 +56,7 @@ class OSCRequestSignerAlgorithmV4TestCase(LibcloudTestCase):
+         )
+         self.assertIn(
+             "Credential=my_key/{}/my_region/my_service/osc4_request".format(
+-                datetime.utcnow().strftime("%Y%m%d")
++                datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime("%Y%m%d")
+             ),
+             headers["Authorization"],
+         )
+diff --git a/libcloud/test/dns/test_base.py b/libcloud/test/dns/test_base.py
+index 006bb8cd9..99d49180e 100644
+--- a/libcloud/test/dns/test_base.py
++++ b/libcloud/test/dns/test_base.py
+@@ -83,7 +83,7 @@ class BaseTestCase(unittest.TestCase):
+         self.driver.list_records = Mock()
+         self.driver.list_records.return_value = mock_records
+ 
+-        now = datetime.datetime.utcnow()
++        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+         result = self.driver.export_zone_to_bind_format(zone=zone)
+         self.driver.export_zone_to_bind_zone_file(zone=zone, file_path=self.tmp_path)
+diff --git a/pyproject.toml b/pyproject.toml
+index b8ea1260e..7acbd7d67 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -46,6 +46,7 @@ classifiers = [
+     "Programming Language :: Python :: 3.11",
+     "Programming Language :: Python :: 3.12",
+     "Programming Language :: Python :: 3.13",
++    "Programming Language :: Python :: 3.14",
+     "Programming Language :: Python :: Implementation :: CPython",
+     "Programming Language :: Python :: Implementation :: PyPy",
+     "Topic :: Software Development :: Libraries :: Python Modules",
+@@ -175,7 +176,7 @@ readme = {file = ["README.rst"], content-type = "text/x-rst"}
+ 
+ [tool.black]
+ line_length = 100
+-target_version = ['py310', 'py311', 'py312', 'py313']
++target_version = ['py310', 'py311', 'py312', 'py313', 'py314']
+ include = '\.pyi?$'
+ exclude = '''
+ (
+diff --git a/tox.ini b/tox.ini
+index a48bd1158..7015aac05 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -1,5 +1,5 @@
+ [tox]
+-envlist = py{pypy3,3.10,3.11,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
++envlist = py{pypy3,3.10,3.11,3.14,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
+ skipsdist = true
+ requires =
+     wheel
+@@ -24,6 +24,8 @@ basepython =
+     pypypy3: pypy3
+     pypypy3.10: pypy3.10
+     pypypy-3.10: pypy3.10
++    pypypy3.14: pypy3.14
++    pypypy-3.14: pypy3.14
+     pypyjion: pyjion
+     {docs,checks,black,black-check,bandit,lint,pylint,mypy,micro-benchmarks,coverage,import-timings,isort,isort-check,pyupgrade,integration-storage}: python3.10
+     {py3.10,py3.10-dist,py3.10-dist-wheel}: python3.10

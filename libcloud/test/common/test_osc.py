@@ -56,7 +56,7 @@ class OSCRequestSignerAlgorithmV4TestCase(LibcloudTestCase):
         )
         self.assertIn(
             "Credential=my_key/{}/my_region/my_service/osc4_request".format(
-                datetime.utcnow().strftime("%Y%m%d")
+                datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime("%Y%m%d")
             ),
             headers["Authorization"],
         )

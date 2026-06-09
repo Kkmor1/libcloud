@@ -517,7 +517,7 @@ class VSphereNodeDriver(NodeDriver):
             if vm.get("config.template"):
                 continue  # Do not include templates in node list
             vms.append(vm)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         vms = [loop.run_in_executor(None, self._to_node, vms[i]) for i in range(len(vms))]
 
         return await asyncio.gather(*vms)
@@ -1416,7 +1416,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
         return loop.run_until_complete(self._list_nodes_async(vm_ids, interfaces))
 
     async def _list_nodes_async(self, vm_ids, interfaces):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         vms = [
             loop.run_in_executor(None, self._to_node, vm_ids[i], interfaces)
             for i in range(len(vm_ids))
@@ -1433,7 +1433,7 @@ class VSphere_REST_NodeDriver(NodeDriver):
         host don't exceed 1000.
         """
         datacenters = self.ex_list_datacenters()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         hosts_futures = [
             loop.run_in_executor(
                 None,

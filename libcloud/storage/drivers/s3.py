@@ -1306,7 +1306,7 @@ class S3StorageDriver(AWSDriver, BaseS3StorageDriver):
         # assemble data for the request we want to pre-sign
         # see: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html # noqa
         object_path = self._get_object_path(obj.container, obj.name)
-        now = datetime.utcnow()
+        now = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         duration_seconds = int(ex_expiry * 3600)
         credparts = (
             self.key,

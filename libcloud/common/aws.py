@@ -272,7 +272,7 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
         return params
 
     def get_request_headers(self, params, headers, method="GET", path="/", data=None):
-        now = datetime.utcnow()
+        now = datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         headers["X-AMZ-Date"] = now.strftime("%Y%m%dT%H%M%SZ")
         headers["X-AMZ-Content-SHA256"] = self._get_payload_hash(method, data)
         headers["Authorization"] = self._get_authorization_v4_header(

@@ -1892,7 +1892,7 @@ class GCEZone(NodeLocation):
         Can be overridden in unittests.
         """
 
-        return datetime.datetime.utcnow()
+        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
     def _get_next_maint(self):
         """

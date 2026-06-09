@@ -210,7 +210,7 @@ import asyncio
 @asyncio.coroutine
 def _list_async(driver):
     projects = [project.id for project in driver.projects]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     futures = [
         loop.run_in_executor(None, driver.ex_list_%s_for_project, p)
         for p in projects
@@ -224,11 +224,8 @@ def _list_async(driver):
             glob,
             loc,
         )
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            loop = asyncio.get_event_loop()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         return loop.run_until_complete(loc["_list_async"](loc["self"]))
 

@@ -17,6 +17,8 @@ import hmac
 import time
 import base64
 import hashlib
+from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Dict, Type, Optional
 from hashlib import sha256
 from datetime import datetime
@@ -274,7 +276,9 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
     def get_request_headers(self, params, headers, method="GET", path="/", data=None):
         now = datetime.utcnow()
         headers["X-AMZ-Date"] = now.strftime("%Y%m%dT%H%M%SZ")
-        headers["X-AMZ-Content-SHA256"] = self._get_payload_hash(method, data)
+        headers["X-AMZ-Content-SHA256"] = self._get_payload_hash(
+            method=method, data=data, headers=headers
+        )
         headers["Authorization"] = self._get_authorization_v4_header(
             params=params, headers=headers, dt=now, method=method, path=path, data=data
         )
@@ -342,52 +346,110 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
             ]
         )
 
+    def _header_pairs(self, headers):
+        if isinstance(headers, Mapping):
+            return list(headers.items())
+        return list(headers)
+
+    def _query_param_pairs(self, params):
+        if isinstance(params, Mapping):
+            items = list(params.items())
+        else:
+            items = list(params)
+
+        pairs = []
+        for key, value in items:
+            if isinstance(value, (list, tuple)):
+                pairs.extend([(key, item) for item in value])
+            else:
+                pairs.append((key, value))
+
+        return pairs
+
     def _get_signed_headers(self, headers):
-        return ";".join([k.lower() for k in sorted(headers.keys(), key=str.lower)])
+        names = sorted({key.lower() for key, _ in self._header_pairs(headers)})
+        return ";".join(names)
 
     def _get_canonical_headers(self, headers):
+        grouped = OrderedDict()
+
+        for key, value in self._header_pairs(headers):
+            name = key.lower()
+            grouped.setdefault(name, []).append(str(value).strip())
+
         return (
             "\n".join(
                 [
-                    ":".join([k.lower(), str(v).strip()])
-                    for k, v in sorted(headers.items(), key=lambda k: k[0].lower())
+                    "{}:{}".format(name, ",".join(grouped[name]))
+                    for name in sorted(grouped.keys())
                 ]
             )
             + "\n"
         )
 
-    def _get_payload_hash(self, method, data=None):
+    def _get_payload_hash(self, method, data=None, headers=None):
+        if headers:
+            for key, value in self._header_pairs(headers):
+                if key.lower() == "x-amz-content-sha256":
+                    return str(value).strip()
+
         if data is UnsignedPayloadSentinel:
             return UNSIGNED_PAYLOAD
-        if method in ("POST", "PUT"):
-            if data:
-                if hasattr(data, "next") or hasattr(data, "__next__"):
-                    # File upload; don't try to read the entire payload
-                    return UNSIGNED_PAYLOAD
-                return _hash(data)
-            else:
-                return UNSIGNED_PAYLOAD
-        else:
+
+        if hasattr(data, "next") or hasattr(data, "__next__"):
+            return UNSIGNED_PAYLOAD
+
+        if data is None:
             return _hash("")
 
+        return _hash(data)
+
     def _get_request_params(self, params):
-        # For self.method == GET
-        return "&".join(
-            [
-                "{}={}".format(urlquote(k, safe=""), urlquote(str(v), safe="~"))
-                for k, v in sorted(params.items())
-            ]
-        )
+        encoded = []
+
+        for key, value in self._query_param_pairs(params):
+            encoded_key = urlquote("" if key is None else str(key), safe="-_.~")
+            encoded_value = urlquote("" if value is None else str(value), safe="-_.~")
+            encoded.append((encoded_key, encoded_value))
+
+        encoded.sort()
+        return "&".join(["{}={}".format(key, value) for key, value in encoded])
+
+    def _get_canonical_path(self, path):
+        normalized = self._normalize_path(path)
+        return urlquote(normalized, safe="/-_.~")
+
+    def _normalize_path(self, path):
+        if not path:
+            return "/"
+
+        trailing_slash = path.endswith("/")
+        segments = []
+
+        for segment in path.split("/"):
+            if segment in ("", "."):
+                continue
+            if segment == "..":
+                if segments:
+                    segments.pop()
+                continue
+            segments.append(segment)
+
+        normalized = "/" + "/".join(segments)
+        if trailing_slash and normalized != "/":
+            normalized += "/"
+
+        return normalized or "/"
 
     def _get_canonical_request(self, params, headers, method, path, data):
         return "\n".join(
             [
                 method,
-                path,
+                self._get_canonical_path(path),
                 self._get_request_params(params),
                 self._get_canonical_headers(headers),
                 self._get_signed_headers(headers),
-                self._get_payload_hash(method, data),
+                self._get_payload_hash(method, data, headers=headers),
             ]
         )
 

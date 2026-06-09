@@ -25,6 +25,7 @@ class Provider:
     """
 
     DUMMY = "dummy"
+    ALIBABA = "alibaba"
     DIMENSIONDATA = "dimensiondata"
     EBS = "ebs"
     GCE = "gce"

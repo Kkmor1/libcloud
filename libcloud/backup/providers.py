@@ -19,6 +19,7 @@ from libcloud.common.providers import set_driver as _set_provider_driver
 
 DRIVERS = {
     Provider.DUMMY: ("libcloud.backup.drivers.dummy", "DummyBackupDriver"),
+    Provider.ALIYUN_HBR: ("libcloud.backup.drivers.aliyun_hbr", "AliyunHBRBackupDriver"),
     Provider.EBS: ("libcloud.backup.drivers.ebs", "EBSBackupDriver"),
     Provider.GCE: ("libcloud.backup.drivers.gce", "GCEBackupDriver"),
     Provider.DIMENSIONDATA: (

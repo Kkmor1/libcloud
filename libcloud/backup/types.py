@@ -25,6 +25,7 @@ class Provider:
     """
 
     DUMMY = "dummy"
+    ALIYUN_HBR = "aliyun_hbr"
     DIMENSIONDATA = "dimensiondata"
     EBS = "ebs"
     GCE = "gce"

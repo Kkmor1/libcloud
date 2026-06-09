@@ -241,7 +241,28 @@ class OSSConnection(ConnectionUserAndKey):
         )
 
 
-class OSSMultipartUpload:
+class FileProgressWrapper(object):
+    """
+    Wrapper for file-like objects to report progress.
+    """
+    def __init__(self, obj, progress_callback, total_bytes):
+        self.obj = obj
+        self.progress_callback = progress_callback
+        self.total_bytes = total_bytes
+        self.bytes_transferred = 0
+
+    def read(self, size=-1):
+        data = self.obj.read(size)
+        if data and self.progress_callback:
+            self.bytes_transferred += len(data)
+            self.progress_callback(self.bytes_transferred, self.total_bytes)
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self.obj, name)
+
+
+class OSSMultipartUpload(object):
     """
     Class representing an Aliyun OSS multipart upload
     """
@@ -451,13 +472,82 @@ class OSSStorageDriver(StorageDriver):
         extra=None,
         verify_hash=True,
         headers=None,
+        progress_callback=None,
     ):
+        file_size = os.stat(file_path).st_size
+
+        if self.supports_multipart_upload and file_size > CHUNK_SIZE:
+            # Initiate multipart upload
+            request_path = self._get_object_path(container, object_name)
+            headers = headers or {}
+            extra = extra or {}
+            
+            content_type = extra.get("content_type", None)
+            meta_data = extra.get("meta_data", None)
+            acl = extra.get("acl", None)
+            
+            if meta_data:
+                for key, value in list(meta_data.items()):
+                    key = self.http_vendor_prefix + "meta-%s" % (key)
+                    headers[key] = value
+
+            if acl:
+                if acl not in ["public-read", "private", "public-read-write"]:
+                    raise AttributeError("invalid acl value: %s" % acl)
+                headers[self.http_vendor_prefix + "object-acl"] = acl
+
+            headers["Content-Type"] = self._determine_content_type(
+                content_type, object_name, file_path=file_path
+            )
+
+            response = self.connection.request(
+                request_path, method="POST", headers=headers, params={"uploads": ""}, container=container
+            )
+            
+            with open(file_path, "rb") as file_stream:
+                if progress_callback:
+                    file_stream = FileProgressWrapper(file_stream, progress_callback, file_size)
+                
+                status, data_hash, bytes_transferred = self._upload_multipart(
+                    response, None, file_stream, container, object_name, calculate_hash=verify_hash
+                )
+
+            response_headers = response.headers
+            server_hash = response_headers.get("etag", "").replace('"', "")
+
+            if verify_hash and data_hash.upper() != server_hash.upper():
+                raise ObjectHashMismatchError(
+                    value="MD5 hash {} checksum does not match {}".format(
+                        server_hash, data_hash
+                    ),
+                    object_name=object_name,
+                    driver=self,
+                )
+            elif response.status == httplib.OK:
+                obj = Object(
+                    name=object_name,
+                    size=bytes_transferred,
+                    hash=server_hash,
+                    extra={"acl": acl},
+                    meta_data=meta_data,
+                    container=container,
+                    driver=self,
+                )
+                return obj
+            else:
+                raise LibcloudError(
+                    "Unexpected status code, status_code=%s" % (response.status),
+                    driver=self,
+                )
+
         return self._put_object(
             container=container,
             object_name=object_name,
             extra=extra,
             file_path=file_path,
             verify_hash=verify_hash,
+            headers=headers,
+            progress_callback=progress_callback,
         )
 
     def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
@@ -600,6 +690,7 @@ class OSSStorageDriver(StorageDriver):
         chunked=False,
         multipart=False,
         container=None,
+        progress_callback=None,
     ):
         """
         Helper function for setting common request headers and calling the
@@ -631,6 +722,10 @@ class OSSStorageDriver(StorageDriver):
             )
         else:
             with open(file_path, "rb") as file_stream:
+                if progress_callback:
+                    file_size = os.path.getsize(file_path)
+                    file_stream = FileProgressWrapper(file_stream, progress_callback, file_size)
+
                 response = self.connection.request(
                     request_path,
                     method=request_method,
@@ -661,6 +756,7 @@ class OSSStorageDriver(StorageDriver):
         stream=None,
         verify_hash=False,
         headers=None,
+        progress_callback=None,
     ):
         """
         Create an object and upload data using the given function.
@@ -696,6 +792,7 @@ class OSSStorageDriver(StorageDriver):
             file_path=file_path,
             stream=stream,
             container=container,
+            progress_callback=progress_callback,
         )
 
         response = result_dict["response"]

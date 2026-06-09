@@ -487,6 +487,7 @@ class OSSStorageDriverTestCase(unittest.TestCase):
             file_path=None,
             stream=None,
             container=None,
+            progress_callback=None,
         ):
             return {
                 "response": make_response(200, headers={"etag": "2345"}),
@@ -515,6 +516,54 @@ class OSSStorageDriverTestCase(unittest.TestCase):
         finally:
             self.driver_type._upload_object = old_func
 
+    def test_upload_object_with_progress_callback(self):
+        progress_calls = []
+        def progress_callback(bytes_transferred, total_bytes):
+            progress_calls.append((bytes_transferred, total_bytes))
+
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            if progress_callback:
+                progress_callback(1000, 1000)
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+        
+        try:
+            obj = self.driver.upload_object(
+                file_path=file_path,
+                container=container,
+                object_name=object_name,
+                verify_hash=True,
+                progress_callback=progress_callback,
+            )
+            self.assertEqual(obj.name, "foo_test_upload")
+            self.assertEqual(len(progress_calls), 1)
+            self.assertEqual(progress_calls[0], (1000, 1000))
+        finally:
+            self.driver_type._upload_object = old_func
+
     def test_upload_object_success(self):
         def upload_file(
             self,
@@ -526,6 +575,7 @@ class OSSStorageDriverTestCase(unittest.TestCase):
             file_path=None,
             stream=None,
             container=None,
+            progress_callback=None,
         ):
             return {
                 "response": make_response(
@@ -565,6 +615,7 @@ class OSSStorageDriverTestCase(unittest.TestCase):
             file_path=None,
             stream=None,
             container=None,
+            progress_callback=None,
         ):
             return {
                 "response": make_response(

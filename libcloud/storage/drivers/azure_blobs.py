@@ -20,7 +20,7 @@ import base64
 import hashlib
 import binascii
 from typing import Literal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from libcloud.utils.py3 import ET, b, httplib, tostring, urlquote, urlencode
 from libcloud.utils.xml import fixxpath

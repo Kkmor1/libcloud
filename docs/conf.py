@@ -61,7 +61,7 @@ source_suffix = ".rst"
 master_doc = "index"
 
 # General information about the project.
-now = datetime.datetime.utcnow()
+now = datetime.datetime.now(datetime.timezone.utc)
 project = "Apache Libcloud"
 copyright = (
     "Copyright (C) 2009 - %s The Apache Software Foundation. Apache Libcloud, Libcloud, Apache, the Apache feather, and the Apache Libcloud project logo are trademarks of the Apache Software Foundation. All other marks mentioned may be trademarks or registered trademarks of their respective owners"

@@ -1,0 +1,307 @@
+diff --git a/.github/workflows/main.yml b/.github/workflows/main.yml
+index 540991747..ecd81c105 100644
+--- a/.github/workflows/main.yml
++++ b/.github/workflows/main.yml
+@@ -39,6 +39,7 @@ jobs:
+           - "3.14"
+           # cryptography is not compatible with older PyPy versions
+           - "pypy-3.10"
++          - "pypy-3.14"
+         os:
+           - ubuntu-latest
+ 
+@@ -70,6 +71,9 @@ jobs:
+       - name: Add .venv to PATH
+         run: echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+ 
++      - name: Run dependency compatibility check
++        run: pip check
++
+       - name: Run unit tests tox target
+         run: tox -e py${{ matrix.python_version }}
+ 
+diff --git a/docs/conf.py b/docs/conf.py
+index 4852097f9..ecc414c7e 100644
+--- a/docs/conf.py
++++ b/docs/conf.py
+@@ -61,7 +61,7 @@ source_suffix = ".rst"
+ master_doc = "index"
+ 
+ # General information about the project.
+-now = datetime.datetime.utcnow()
++now = datetime.datetime.now(datetime.timezone.utc)
+ project = "Apache Libcloud"
+ copyright = (
+     "Copyright (C) 2009 - %s The Apache Software Foundation. Apache Libcloud, Libcloud, Apache, the Apache feather, and the Apache Libcloud project logo are trademarks of the Apache Software Foundation. All other marks mentioned may be trademarks or registered trademarks of their respective owners"
+diff --git a/libcloud/common/aws.py b/libcloud/common/aws.py
+index b575b66cc..70a395bd5 100644
+--- a/libcloud/common/aws.py
++++ b/libcloud/common/aws.py
+@@ -19,7 +19,7 @@ import base64
+ import hashlib
+ from typing import Dict, Type, Optional
+ from hashlib import sha256
+-from datetime import datetime
++from datetime import datetime, timezone
+ 
+ from libcloud.utils.py3 import ET, b, httplib, urlquote, basestring, _real_unicode
+ from libcloud.utils.xml import findall_ignore_namespace, findtext_ignore_namespace
+@@ -272,7 +272,7 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
+         return params
+ 
+     def get_request_headers(self, params, headers, method="GET", path="/", data=None):
+-        now = datetime.utcnow()
++        now = datetime.now(timezone.utc).replace(tzinfo=None)
+         headers["X-AMZ-Date"] = now.strftime("%Y%m%dT%H%M%SZ")
+         headers["X-AMZ-Content-SHA256"] = self._get_payload_hash(method, data)
+         headers["Authorization"] = self._get_authorization_v4_header(
+diff --git a/libcloud/common/google.py b/libcloud/common/google.py
+index eab0fb3af..64610d2fe 100644
+--- a/libcloud/common/google.py
++++ b/libcloud/common/google.py
+@@ -106,7 +106,7 @@ def _utcnow():
+     """
+     Mocked in libcloud.test.common.google.GoogleTestCase.
+     """
+-    return datetime.datetime.utcnow()
++    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+ 
+ def _utc_timestamp(datetime_obj):
+diff --git a/libcloud/common/openstack_identity.py b/libcloud/common/openstack_identity.py
+index 51953b166..690194e3a 100644
+--- a/libcloud/common/openstack_identity.py
++++ b/libcloud/common/openstack_identity.py
+@@ -791,7 +791,7 @@ class OpenStackIdentityConnection(ConnectionUserAndKey):
+         )
+ 
+         time_tuple_expires = expires.utctimetuple()
+-        time_tuple_now = datetime.datetime.utcnow().utctimetuple()
++        time_tuple_now = datetime.datetime.now(datetime.timezone.utc).utctimetuple()
+ 
+         if time_tuple_now < time_tuple_expires:
+             return True
+diff --git a/libcloud/common/osc.py b/libcloud/common/osc.py
+index 7dcdf32f6..ba0028df7 100644
+--- a/libcloud/common/osc.py
++++ b/libcloud/common/osc.py
+@@ -15,7 +15,7 @@
+ 
+ import hmac
+ import hashlib
+-from datetime import datetime
++from datetime import datetime, timezone
+ 
+ from libcloud.utils.py3 import urlquote
+ 
+@@ -75,7 +75,7 @@ class OSCRequestSignerAlgorithmV4(OSCRequestSigner):
+         )
+ 
+     def get_request_headers(self, service_name: str, region: str, action: str, data: str):
+-        date = datetime.utcnow()
++        date = datetime.now(timezone.utc).replace(tzinfo=None)
+         host = "{}.{}.outscale.com".format(service_name, region)
+         headers = {
+             "Content-Type": "application/json; charset=utf-8",
+diff --git a/libcloud/compute/drivers/gce.py b/libcloud/compute/drivers/gce.py
+index bdb46dbdc..35a4c4c0e 100644
+--- a/libcloud/compute/drivers/gce.py
++++ b/libcloud/compute/drivers/gce.py
+@@ -1892,7 +1892,7 @@ class GCEZone(NodeLocation):
+         Can be overridden in unittests.
+         """
+ 
+-        return datetime.datetime.utcnow()
++        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+     def _get_next_maint(self):
+         """
+diff --git a/libcloud/dns/base.py b/libcloud/dns/base.py
+index f87844744..76d7ac9f1 100644
+--- a/libcloud/dns/base.py
++++ b/libcloud/dns/base.py
+@@ -480,7 +480,7 @@ class DNSDriver(BaseDriver):
+         records = zone.list_records()
+         records = sorted(records, key=Record._get_numeric_id)
+ 
+-        date = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
++        date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+         values = {"version": __version__, "date": date}
+ 
+         lines.append("; Generated by Libcloud v%(version)s on %(date)s UTC" % values)
+diff --git a/libcloud/dns/drivers/auroradns.py b/libcloud/dns/drivers/auroradns.py
+index 0cd40239b..97764212a 100644
+--- a/libcloud/dns/drivers/auroradns.py
++++ b/libcloud/dns/drivers/auroradns.py
+@@ -257,7 +257,7 @@ class AuroraDNSConnection(ConnectionUserAndKey):
+         if method in ("POST", "PUT"):
+             headers = {"Content-Type": "application/json; charset=UTF-8"}
+ 
+-        t = datetime.datetime.utcnow()
++        t = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+         timestamp = t.strftime("%Y%m%dT%H%M%SZ")
+ 
+         headers["X-AuroraDNS-Date"] = timestamp
+diff --git a/libcloud/dns/drivers/route53.py b/libcloud/dns/drivers/route53.py
+index 6140cc6cb..bca9c53db 100644
+--- a/libcloud/dns/drivers/route53.py
++++ b/libcloud/dns/drivers/route53.py
+@@ -60,7 +60,7 @@ class BaseRoute53Connection(ConnectionUserAndKey):
+     responseCls = Route53DNSResponse
+ 
+     def pre_connect_hook(self, params, headers):
+-        time_string = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
++        time_string = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+         headers["Date"] = time_string
+         tmp = []
+ 
+diff --git a/libcloud/storage/drivers/azure_blobs.py b/libcloud/storage/drivers/azure_blobs.py
+index adaf3d81f..010cdad40 100644
+--- a/libcloud/storage/drivers/azure_blobs.py
++++ b/libcloud/storage/drivers/azure_blobs.py
+@@ -20,7 +20,7 @@ import base64
+ import hashlib
+ import binascii
+ from typing import Literal
+-from datetime import datetime, timedelta
++from datetime import datetime, timedelta, timezone
+ 
+ from libcloud.utils.py3 import ET, b, httplib, tostring, urlquote, urlencode
+ from libcloud.utils.xml import fixxpath
+diff --git a/libcloud/storage/drivers/s3.py b/libcloud/storage/drivers/s3.py
+index bd9212ea5..f30fa88f1 100644
+--- a/libcloud/storage/drivers/s3.py
++++ b/libcloud/storage/drivers/s3.py
+@@ -19,7 +19,7 @@ import time
+ import base64
+ from typing import Dict, Literal, Optional
+ from hashlib import sha1
+-from datetime import datetime
++from datetime import datetime, timezone
+ 
+ import libcloud.utils.py3
+ from libcloud.utils.py3 import b, httplib, tostring, urlquote, urlencode
+@@ -1306,7 +1306,7 @@ class S3StorageDriver(AWSDriver, BaseS3StorageDriver):
+         # assemble data for the request we want to pre-sign
+         # see: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html # noqa
+         object_path = self._get_object_path(obj.container, obj.name)
+-        now = datetime.utcnow()
++        now = datetime.now(timezone.utc).replace(tzinfo=None)
+         duration_seconds = int(ex_expiry * 3600)
+         credparts = (
+             self.key,
+diff --git a/libcloud/test/common/test_openstack_identity.py b/libcloud/test/common/test_openstack_identity.py
+index 9e74970c9..1d413ef20 100644
+--- a/libcloud/test/common/test_openstack_identity.py
++++ b/libcloud/test/common/test_openstack_identity.py
+@@ -259,7 +259,7 @@ class OpenStackIdentityConnectionTestCase(unittest.TestCase):
+ 
+         # No force reauth, valid / non-expired token which is about to expire in
+         # less than AUTH_TOKEN_EXPIRES_GRACE_SECONDS
+-        soon = datetime.datetime.utcnow() + datetime.timedelta(
++        soon = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(
+             seconds=AUTH_TOKEN_EXPIRES_GRACE_SECONDS - 1
+         )
+         osa.auth_token = None
+diff --git a/libcloud/test/common/test_osc.py b/libcloud/test/common/test_osc.py
+index 351c340fa..b65745cb7 100644
+--- a/libcloud/test/common/test_osc.py
++++ b/libcloud/test/common/test_osc.py
+@@ -56,7 +56,7 @@ class OSCRequestSignerAlgorithmV4TestCase(LibcloudTestCase):
+         )
+         self.assertIn(
+             "Credential=my_key/{}/my_region/my_service/osc4_request".format(
+-                datetime.utcnow().strftime("%Y%m%d")
++                datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%d")
+             ),
+             headers["Authorization"],
+         )
+diff --git a/libcloud/test/dns/test_base.py b/libcloud/test/dns/test_base.py
+index 006bb8cd9..99d49180e 100644
+--- a/libcloud/test/dns/test_base.py
++++ b/libcloud/test/dns/test_base.py
+@@ -83,7 +83,7 @@ class BaseTestCase(unittest.TestCase):
+         self.driver.list_records = Mock()
+         self.driver.list_records.return_value = mock_records
+ 
+-        now = datetime.datetime.utcnow()
++        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+ 
+         result = self.driver.export_zone_to_bind_format(zone=zone)
+         self.driver.export_zone_to_bind_zone_file(zone=zone, file_path=self.tmp_path)
+diff --git a/pyproject.toml b/pyproject.toml
+index b8ea1260e..7acbd7d67 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -46,6 +46,7 @@ classifiers = [
+     "Programming Language :: Python :: 3.11",
+     "Programming Language :: Python :: 3.12",
+     "Programming Language :: Python :: 3.13",
++    "Programming Language :: Python :: 3.14",
+     "Programming Language :: Python :: Implementation :: CPython",
+     "Programming Language :: Python :: Implementation :: PyPy",
+     "Topic :: Software Development :: Libraries :: Python Modules",
+@@ -175,7 +176,7 @@ readme = {file = ["README.rst"], content-type = "text/x-rst"}
+ 
+ [tool.black]
+ line_length = 100
+-target_version = ['py310', 'py311', 'py312', 'py313']
++target_version = ['py310', 'py311', 'py312', 'py313', 'py314']
+ include = '\.pyi?$'
+ exclude = '''
+ (
+diff --git a/tox.ini b/tox.ini
+index a48bd1158..948fc4995 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -1,5 +1,5 @@
+ [tox]
+-envlist = py{pypy3,3.10,3.11,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
++envlist = py{pypy3,3.10,3.11,3.12,3.13,3.14,pyjion},checks,lint,pylint,pyupgrade,isort,black,mypy,docs,coverage,integration-storage
+ skipsdist = true
+ requires =
+     wheel
+@@ -24,12 +24,15 @@ basepython =
+     pypypy3: pypy3
+     pypypy3.10: pypy3.10
+     pypypy-3.10: pypy3.10
++    pypypy-3.14: pypy3.14
+     pypyjion: pyjion
+     {docs,checks,black,black-check,bandit,lint,pylint,mypy,micro-benchmarks,coverage,import-timings,isort,isort-check,pyupgrade,integration-storage}: python3.10
+     {py3.10,py3.10-dist,py3.10-dist-wheel}: python3.10
+     {py3.11,py3.11-dist,py3.11-dist-wheel}: python3.11
+     {py3.12,py3.12-dist,py3.12-dist-wheel}: python3.12
++    {py3.13,py3.13-dist,py3.13-dist-wheel}: python3.13
+     {py3.13-dev,py3.13-dev-dist,py3.13-dev-dist-wheel}: python3.13
++    {py3.14,py3.14-dist,py3.14-dist-wheel}: python3.14
+     {py3.14-dev,py3.14-dev-dist,py3.14-dev-dist-wheel}: python3.14
+ setenv =
+   CRYPTOGRAPHY_ALLOW_OPENSSL_102=1
+@@ -127,6 +130,27 @@ dependency_groups =
+ deps =
+ commands = bash -c "./scripts/dist_wheel_install_check.sh"
+ 
++[testenv:py3.14-dist]
++# Verify library installs without any dependencies when using python setup.py
++# install
++skipdist = True
++recreate = True
++# NOTE: We intentionally set empty deps to ensure it works on a clean
++# environment without any dependencies
++dependency_groups =
++deps =
++commands = bash -c "./scripts/dist_install_check.sh"
++
++[testenv:py3.14-dist-wheel]
++# Verify library installs without any dependencies when using built wheel
++skipdist = True
++recreate = True
++# NOTE: We intentionally set empty deps to ensure it works on a clean
++# environment without any dependencies
++dependency_groups =
++deps =
++commands = bash -c "./scripts/dist_wheel_install_check.sh"
++
+ [testenv:docs]
+ dependency_groups =
+     docs

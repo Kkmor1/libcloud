@@ -39,6 +39,7 @@ jobs:
           - "3.14"
           # cryptography is not compatible with older PyPy versions
           - "pypy-3.10"
+          - "pypy-3.14"
         os:
           - ubuntu-latest
 
@@ -74,7 +75,7 @@ jobs:
         run: tox -e py${{ matrix.python_version }}
 
       - name: Run dist install checks tox target
-        if: ${{ matrix.python_version != 'pypy-3.10' }}
+        if: ${{ matrix.python_version != 'pypy-3.10' && matrix.python_version != 'pypy-3.14' }}
         run: tox -e py${{ matrix.python_version }}-dist,py${{ matrix.python_version }}-dist-wheel
 
   code_coverage:
@@ -344,6 +345,46 @@ jobs:
 
       - name: Run Bandit Check
         run: tox -e bandit
+
+  dependency_compatibility:
+    name: Verify Dependency Compatibility (${{ matrix.python_version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+          - "pypy-3.10"
+          - "pypy-3.14"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Use Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Install OS / deb dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq gcc libvirt-dev pkg-config
+
+      - name: Verify full dependency resolution
+        run: |
+          uv sync --group ci --group test --no-dev
+          echo "All dependencies resolved successfully for ${{ matrix.python_version }}"
+
+      - name: Show installed packages
+        run: uv pip list
 
   micro-benchmarks:
     name: Micro Benchmarks

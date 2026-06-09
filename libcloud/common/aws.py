@@ -374,16 +374,18 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
         # For self.method == GET
         return "&".join(
             [
-                "{}={}".format(urlquote(k, safe=""), urlquote(str(v), safe="~"))
+                "{}={}".format(urlquote(k, safe="~"), urlquote(str(v), safe="~"))
                 for k, v in sorted(params.items())
             ]
         )
 
     def _get_canonical_request(self, params, headers, method, path, data):
+        # AWS requires the canonical URI to be URI-encoded according to RFC 3986
+        canonical_uri = urlquote(path, safe="/~") if path else "/"
         return "\n".join(
             [
                 method,
-                path,
+                canonical_uri,
                 self._get_request_params(params),
                 self._get_canonical_headers(headers),
                 self._get_signed_headers(headers),

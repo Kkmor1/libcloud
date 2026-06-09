@@ -1,0 +1,40 @@
+diff --git a/libcloud/common/aws.py b/libcloud/common/aws.py
+index b575b66cc..3034505c7 100644
+--- a/libcloud/common/aws.py
++++ b/libcloud/common/aws.py
+@@ -374,16 +374,18 @@ class AWSRequestSignerAlgorithmV4(AWSRequestSigner):
+         # For self.method == GET
+         return "&".join(
+             [
+-                "{}={}".format(urlquote(k, safe=""), urlquote(str(v), safe="~"))
++                "{}={}".format(urlquote(k, safe="~"), urlquote(str(v), safe="~"))
+                 for k, v in sorted(params.items())
+             ]
+         )
+ 
+     def _get_canonical_request(self, params, headers, method, path, data):
++        # AWS requires the canonical URI to be URI-encoded according to RFC 3986
++        canonical_uri = urlquote(path, safe="/~") if path else "/"
+         return "\n".join(
+             [
+                 method,
+-                path,
++                canonical_uri,
+                 self._get_request_params(params),
+                 self._get_canonical_headers(headers),
+                 self._get_signed_headers(headers),
+diff --git a/libcloud/test/common/test_aws.py b/libcloud/test/common/test_aws.py
+index df3f18d40..34a31f748 100644
+--- a/libcloud/test/common/test_aws.py
++++ b/libcloud/test/common/test_aws.py
+@@ -242,8 +242,8 @@ class AWSRequestSignerAlgorithmV4TestCase(LibcloudTestCase):
+ 
+     def test_get_request_params_urlquotes_params_keys(self):
+         self.assertEqual(
+-            self.signer._get_request_params({"Action+Reaction": "DescribeInstances"}),
+-            "Action%2BReaction=DescribeInstances",
++            self.signer._get_request_params({"Action+Reaction~": "DescribeInstances"}),
++            "Action%2BReaction~=DescribeInstances",
+         )
+ 
+     def test_get_request_params_urlquotes_params_values(self):

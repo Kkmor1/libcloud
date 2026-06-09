@@ -242,8 +242,8 @@ class AWSRequestSignerAlgorithmV4TestCase(LibcloudTestCase):
 
     def test_get_request_params_urlquotes_params_keys(self):
         self.assertEqual(
-            self.signer._get_request_params({"Action+Reaction": "DescribeInstances"}),
-            "Action%2BReaction=DescribeInstances",
+            self.signer._get_request_params({"Action+Reaction~": "DescribeInstances"}),
+            "Action%2BReaction~=DescribeInstances",
         )
 
     def test_get_request_params_urlquotes_params_values(self):

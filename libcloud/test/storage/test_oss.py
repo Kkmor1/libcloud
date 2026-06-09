@@ -717,6 +717,122 @@ class OSSStorageDriverTestCase(unittest.TestCase):
 
             self.assertEqual(3, mock_abort.call_count)
 
+    def test_upload_object_with_progress_callback(self):
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            if progress_callback:
+                file_size = os.path.getsize(file_path)
+                progress_callback(file_size, file_size)
+
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+
+        progress_calls = []
+
+        def progress_callback(uploaded, total):
+            progress_calls.append((uploaded, total))
+
+        obj = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name=object_name,
+            verify_hash=True,
+            progress_callback=progress_callback,
+        )
+
+        self.driver_type._upload_object = old_func
+
+        self.assertEqual(obj.name, "foo_test_upload")
+        self.assertEqual(len(progress_calls), 1)
+        self.assertGreater(progress_calls[0][0], 0)
+        self.assertEqual(progress_calls[0][0], progress_calls[0][1])
+
+    def test_upload_object_without_progress_callback(self):
+        def upload_file(
+            self,
+            object_name=None,
+            content_type=None,
+            request_path=None,
+            request_method=None,
+            headers=None,
+            file_path=None,
+            stream=None,
+            container=None,
+            progress_callback=None,
+        ):
+            return {
+                "response": make_response(
+                    200, headers={"etag": "0cc175b9c0f1b6a831c399e269772661"}
+                ),
+                "bytes_transferred": 1000,
+                "data_hash": "0cc175b9c0f1b6a831c399e269772661",
+            }
+
+        self.mock_response_klass.type = None
+        old_func = self.driver_type._upload_object
+        self.driver_type._upload_object = upload_file
+
+        file_path = os.path.abspath(__file__)
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload"
+
+        obj = self.driver.upload_object(
+            file_path=file_path,
+            container=container,
+            object_name=object_name,
+            verify_hash=True,
+        )
+
+        self.driver_type._upload_object = old_func
+
+        self.assertEqual(obj.name, "foo_test_upload")
+        self.assertEqual(obj.size, 1000)
+
+    def test_upload_object_via_stream_with_progress_callback(self):
+        self.mock_response_klass.type = "multipart"
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_stream_data"
+        iterator = DummyIterator(data=["2", "3", "5"])
+        extra = {"content_type": "text/plain"}
+
+        progress_calls = []
+
+        def progress_callback(uploaded, total):
+            progress_calls.append((uploaded, total))
+
+        obj = self.driver.upload_object_via_stream(
+            container=container,
+            object_name=object_name,
+            iterator=iterator,
+            extra=extra,
+        )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, 3)
+
     def test_delete_object_not_found(self):
         self.mock_response_klass.type = "not_found"
         container = Container(name="foo_bar_container", extra={}, driver=self.driver)

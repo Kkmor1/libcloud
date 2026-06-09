@@ -554,6 +554,89 @@ class OSSStorageDriverTestCase(unittest.TestCase):
         self.assertTrue("some-value" in obj.meta_data)
         self.driver_type._upload_object = old_func
 
+    def test_upload_object_progress_callback(self):
+        file_path = os.path.abspath(__file__) + ".temp"
+        file_body = b("hello world")
+
+        with open(file_path, "wb") as file_handle:
+            file_handle.write(file_body)
+
+        file_hash = self.driver._get_hash_function()
+        file_hash.update(file_body)
+        callback_history = []
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload_progress"
+
+        def progress_callback(bytes_transferred, total_bytes):
+            callback_history.append((bytes_transferred, total_bytes))
+
+        def request(request_path, method=None, data=None, headers=None, raw=False, container=None):
+            while data.read(3):
+                pass
+
+            return make_response(200, headers={"etag": file_hash.hexdigest()})
+
+        with mock.patch.object(self.driver.connection, "request", side_effect=request):
+            obj = self.driver.upload_object(
+                file_path=file_path,
+                container=container,
+                object_name=object_name,
+                verify_hash=True,
+                progress_callback=progress_callback,
+            )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, len(file_body))
+        self.assertEqual(
+            callback_history,
+            [(3, len(file_body)), (6, len(file_body)), (9, len(file_body)), (11, len(file_body))],
+        )
+
+    def test_upload_object_progress_callback_with_multipart_upload(self):
+        file_path = os.path.abspath(__file__) + ".temp"
+        file_body = b("2") * CHUNK_SIZE + b("3") * CHUNK_SIZE + b("5")
+        total_bytes = len(file_body)
+
+        with open(file_path, "wb") as file_handle:
+            file_handle.write(file_body)
+
+        callback_history = []
+        container = Container(name="foo_bar_container", extra={}, driver=self.driver)
+        object_name = "foo_test_upload_progress_multipart"
+        request_counter = {"count": 0}
+
+        def progress_callback(bytes_transferred, total_bytes):
+            callback_history.append((bytes_transferred, total_bytes))
+
+        def request(request_path, method=None, data=None, headers=None, container=None):
+            request_counter["count"] += 1
+            return make_response(
+                200, headers={"etag": '"part-%s"' % (request_counter["count"])}
+            )
+
+        with mock.patch.object(self.driver, "_initiate_multipart", return_value="upload-id") as mock_initiate:
+            with mock.patch.object(
+                self.driver, "_commit_multipart", return_value='"complete-etag"'
+            ) as mock_commit:
+                with mock.patch.object(self.driver.connection, "request", side_effect=request):
+                    obj = self.driver.upload_object(
+                        file_path=file_path,
+                        container=container,
+                        object_name=object_name,
+                        verify_hash=False,
+                        progress_callback=progress_callback,
+                    )
+
+        self.assertEqual(obj.name, object_name)
+        self.assertEqual(obj.size, total_bytes)
+        self.assertEqual(
+            callback_history,
+            [(CHUNK_SIZE, total_bytes), (CHUNK_SIZE * 2, total_bytes), (total_bytes, total_bytes)],
+        )
+        self.assertEqual(mock_initiate.call_count, 1)
+        self.assertEqual(len(mock_commit.call_args[0][2]), 3)
+        self.assertEqual(request_counter["count"], 3)
+
     def test_upload_object_with_acl(self):
         def upload_file(
             self,

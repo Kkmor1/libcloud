@@ -62,6 +62,41 @@ CHUNK_SIZE = 100 * 1024
 MAX_UPLOADS_PER_RESPONSE = 1000
 
 
+class _ProgressCallbackStream:
+    def __init__(self, stream, total_bytes, progress_callback):
+        self.stream = stream
+        self.total_bytes = total_bytes
+        self.progress_callback = progress_callback
+        self.bytes_transferred = 0
+        self._reported_empty = False
+
+    def read(self, *args, **kwargs):
+        data = self.stream.read(*args, **kwargs)
+        self._report_progress(data)
+        return data
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        data = next(self.stream)
+        self._report_progress(data)
+        return data
+
+    next = __next__
+
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+    def _report_progress(self, data):
+        if data:
+            self.bytes_transferred += len(data)
+            self.progress_callback(self.bytes_transferred, self.total_bytes)
+        elif self.total_bytes == 0 and not self._reported_empty:
+            self.progress_callback(0, 0)
+            self._reported_empty = True
+
+
 class OSSResponse(XmlResponse):
     namespace = None
     valid_response_codes = [httplib.NOT_FOUND, httplib.CONFLICT, httplib.BAD_REQUEST]
@@ -451,13 +486,31 @@ class OSSStorageDriver(StorageDriver):
         extra=None,
         verify_hash=True,
         headers=None,
+        progress_callback=None,
     ):
+        file_size = os.path.getsize(file_path)
+
+        if progress_callback is not None and self.supports_multipart_upload and file_size > CHUNK_SIZE:
+            with open(file_path, "rb") as stream:
+                return self._put_object_multipart(
+                    container=container,
+                    object_name=object_name,
+                    stream=stream,
+                    extra=extra,
+                    verify_hash=verify_hash,
+                    headers=headers,
+                    progress_callback=progress_callback,
+                    total_bytes=file_size,
+                )
+
         return self._put_object(
             container=container,
             object_name=object_name,
             extra=extra,
             file_path=file_path,
             verify_hash=verify_hash,
+            progress_callback=progress_callback,
+            total_bytes=file_size,
         )
 
     def upload_object_via_stream(self, iterator, container, object_name, extra=None, headers=None):
@@ -600,6 +653,8 @@ class OSSStorageDriver(StorageDriver):
         chunked=False,
         multipart=False,
         container=None,
+        progress_callback=None,
+        total_bytes=None,
     ):
         """
         Helper function for setting common request headers and calling the
@@ -618,10 +673,14 @@ class OSSStorageDriver(StorageDriver):
         )
 
         if stream:
+            request_stream = stream
+            if progress_callback is not None:
+                request_stream = _ProgressCallbackStream(stream, total_bytes, progress_callback)
+
             response = self.connection.request(
                 request_path,
                 method=request_method,
-                data=stream,
+                data=request_stream,
                 headers=headers,
                 raw=True,
                 container=container,
@@ -631,15 +690,20 @@ class OSSStorageDriver(StorageDriver):
             )
         else:
             with open(file_path, "rb") as file_stream:
+                request_stream = file_stream
+                if progress_callback is not None:
+                    request_stream = _ProgressCallbackStream(
+                        file_stream, total_bytes, progress_callback
+                    )
+
                 response = self.connection.request(
                     request_path,
                     method=request_method,
-                    data=file_stream,
+                    data=request_stream,
                     headers=headers,
                     raw=True,
                     container=container,
                 )
-            with open(file_path, "rb") as file_stream:
                 stream_hash, stream_length = self._hash_buffered_stream(
                     file_stream, self._get_hash_function()
                 )
@@ -661,6 +725,8 @@ class OSSStorageDriver(StorageDriver):
         stream=None,
         verify_hash=False,
         headers=None,
+        progress_callback=None,
+        total_bytes=None,
     ):
         """
         Create an object and upload data using the given function.
@@ -696,6 +762,8 @@ class OSSStorageDriver(StorageDriver):
             file_path=file_path,
             stream=stream,
             container=container,
+            progress_callback=progress_callback,
+            total_bytes=total_bytes,
         )
 
         response = result_dict["response"]
@@ -729,6 +797,85 @@ class OSSStorageDriver(StorageDriver):
                 "Unexpected status code, status_code=%s" % (response.status),
                 driver=self,
             )
+
+    def _initiate_multipart(self, container, object_name, headers=None):
+        headers = headers or {}
+        request_path = self._get_object_path(container, object_name)
+
+        response = self.connection.request(
+            request_path,
+            method="POST",
+            headers=headers,
+            params={"uploads": ""},
+            container=container,
+        )
+
+        if response.status != httplib.OK:
+            raise LibcloudError("Error initiating multipart upload", driver=self)
+
+        body = response.parse_body()
+        return body.find(fixxpath(xpath="UploadId", namespace=self.namespace)).text
+
+    def _put_object_multipart(
+        self,
+        container,
+        object_name,
+        stream,
+        extra=None,
+        verify_hash=False,
+        headers=None,
+        progress_callback=None,
+        total_bytes=None,
+    ):
+        headers = headers or {}
+        extra = extra or {}
+
+        content_type = extra.get("content_type", None)
+        meta_data = extra.get("meta_data", None)
+        acl = extra.get("acl", None)
+
+        headers["Content-Type"] = self._determine_content_type(
+            content_type, object_name
+        )
+
+        if meta_data:
+            for key, value in list(meta_data.items()):
+                key = self.http_vendor_prefix + "meta-%s" % (key)
+                headers[key] = value
+
+        if acl:
+            if acl not in ["public-read", "private", "public-read-write"]:
+                raise AttributeError("invalid acl value: %s" % acl)
+            headers[self.http_vendor_prefix + "object-acl"] = acl
+
+        object_path = self._get_object_path(container, object_name)
+        upload_id = self._initiate_multipart(container, object_name, headers=headers)
+
+        try:
+            result = self._upload_from_iterator(
+                stream,
+                object_path,
+                upload_id,
+                calculate_hash=verify_hash,
+                container=container,
+                progress_callback=progress_callback,
+                total_bytes=total_bytes,
+            )
+            chunks, _, bytes_transferred = result
+            etag = self._commit_multipart(object_path, upload_id, chunks, container=container)
+        except Exception:
+            self._abort_multipart(object_path, upload_id, container=container)
+            raise
+
+        return Object(
+            name=object_name,
+            size=bytes_transferred,
+            hash=etag.replace('"', ""),
+            extra={"acl": acl},
+            meta_data=meta_data,
+            container=container,
+            driver=self,
+        )
 
     def _upload_multipart(
         self, response, data, iterator, container, object_name, calculate_hash=True
@@ -788,7 +935,14 @@ class OSSStorageDriver(StorageDriver):
         return (True, data_hash, bytes_transferred)
 
     def _upload_from_iterator(
-        self, iterator, object_path, upload_id, calculate_hash=True, container=None
+        self,
+        iterator,
+        object_path,
+        upload_id,
+        calculate_hash=True,
+        container=None,
+        progress_callback=None,
+        total_bytes=None,
     ):
         """
         Uploads data from an iterator in fixed sized chunks to OSS
@@ -834,8 +988,6 @@ class OSSStorageDriver(StorageDriver):
             chunk_hash.update(data)
             chunk_hash = base64.b64encode(chunk_hash.digest()).decode("utf-8")
 
-            # OSS will calculate hash of the uploaded data and
-            # check this header.
             headers = {"Content-MD5": chunk_hash}
             params["partNumber"] = count
 
@@ -854,8 +1006,11 @@ class OSSStorageDriver(StorageDriver):
 
             server_hash = resp.headers["etag"]
 
-            # Keep this data for a later commit
             chunks.append((count, server_hash))
+
+            if progress_callback is not None:
+                progress_callback(bytes_transferred, total_bytes)
+
             count += 1
 
         if calculate_hash:
